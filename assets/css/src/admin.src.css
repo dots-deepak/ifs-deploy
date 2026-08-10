@@ -1,0 +1,1731 @@
+/*
+ * IFS Deploy admin styles — SOURCE FILE. Edit this, never assets/css/admin.css.
+ *
+ *   tools/tailwindcss.exe -i assets/css/src/admin.src.css -o assets/css/admin.css --watch
+ *   tools/tailwindcss.exe -i assets/css/src/admin.src.css -o assets/css/admin.css --minify
+ *
+ * ARCHITECTURE — two deliberate choices, both explained because both are easy to
+ * "tidy up" into a bug:
+ *
+ * 1. No `@tailwind base`. Preflight is off in tailwind.config.js and must stay off:
+ *    its global reset would restyle bare h1/table/button across the whole of
+ *    wp-admin, breaking core screens and every other plugin.
+ *
+ * 2. Component CSS below is PLAIN CSS, deliberately NOT inside `@layer components`.
+ *    Tailwind purges @layer content it cannot find in the scanned files, and eight
+ *    of our class names are built by PHP concatenation —
+ *    `'ifs-deploy-status-' . $tone`, `'ifs-deploy-chip-' . $change`,
+ *    `'is-' . $tone` — so the full names never appear literally anywhere. Inside a
+ *    layer they would be silently stripped and every status badge, diff chip and
+ *    inline notice would lose its styling. Outside a layer they are passed through
+ *    untouched.
+ *
+ * `@tailwind utilities` is LAST on purpose: equal specificity means source order
+ * decides, so a `tw-` utility can override a component at the call site — which is
+ * the whole point of utility-first authoring.
+ */
+
+/* ===========================================================================
+   Inter — bundled, not loaded from a CDN
+   ===========================================================================
+   `assets/fonts/inter-latin-variable.woff2` is 48 KB: the Latin subset of Inter's
+   VARIABLE font, so weights 100–900 all come from that one file. Bundling is not a
+   preference here:
+
+   - wordpress.org's plugin guidelines forbid loading assets from third-party services,
+     so a Google Fonts <link> would fail review outright.
+   - Serving fonts from Google's CDN transmits visitor IPs to a third party, which has
+     been ruled a GDPR violation in the EU. This plugin runs on client sites.
+   - It is one same-origin request against three (CSS → CDN CSS → font file), with no
+     extra DNS or TLS handshake.
+
+   The licence (SIL OFL 1.1) ships beside the font in `assets/fonts/Inter-LICENSE.txt`,
+   which the same guidelines require for bundled third-party assets.
+
+   `font-display: swap` means text paints immediately in the fallback and re-renders
+   when Inter arrives — never invisible. `unicode-range` lets the browser skip the
+   download entirely on a page with no Latin glyphs.
+   =========================================================================== */
+
+@font-face {
+	font-family: 'Inter';
+	font-style: normal;
+	/* One file, whole weight axis. */
+	font-weight: 100 900;
+	font-display: swap;
+	src: url('../fonts/inter-latin-variable.woff2') format('woff2-variations'),
+		url('../fonts/inter-latin-variable.woff2') format('woff2');
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+		U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191,
+		U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * SCOPED to our own screens. Setting this on `body` would restyle the admin menu, every
+ * core screen and every other plugin — exactly the global bleed §1.2 exists to prevent.
+ */
+.ifs-deploy {
+	font-family: theme(fontFamily.sans);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	/* Inter's tabular figures keep ID and count columns from shifting width. */
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: 'cv05' 1;
+	/* single-storey l, so 1/l/I stay distinguishable */
+}
+
+/*
+ * Form controls do NOT inherit font-family — browsers apply their own UI font. wp-admin
+ * papers over this globally; inside our screens we have to say it again.
+ */
+.ifs-deploy input,
+.ifs-deploy select,
+.ifs-deploy textarea,
+.ifs-deploy button {
+	font-family: inherit;
+}
+
+/* Monospace runs keep their own family; undo the tabular/feature settings there. */
+.ifs-deploy code,
+.ifs-deploy pre,
+.ifs-deploy .dp-input-mono {
+	font-feature-settings: normal;
+}
+
+/*
+ * Status pill: tinted fill, matching border, uppercase label, and a glyph for the two
+ * outcomes that matter at a glance. The border is what keeps the pill legible on the
+ * zebra stripe — a fill alone at these tint levels almost disappears against grey-25.
+ *
+ * The glyph is CSS `content`, so the PHP still emits plain words and the accessible
+ * name is unchanged. Only success and failure get one; "partial" and "rolled back"
+ * are states you read rather than scan for.
+ */
+.ifs-deploy .ifs-deploy-status {
+	@apply tw-inline-flex tw-items-center tw-gap-1 tw-whitespace-nowrap tw-rounded-full;
+	@apply tw-border tw-border-grey-200 tw-bg-grey-50 tw-px-2.5 tw-py-1;
+	@apply tw-text-xs tw-font-semibold tw-uppercase tw-text-grey-600;
+	letter-spacing: 0.04em;
+}
+
+.ifs-deploy .ifs-deploy-status-success {
+	@apply tw-border-success-border tw-bg-success-bg tw-text-success-text;
+}
+
+.ifs-deploy .ifs-deploy-status-success::before {
+	content: '\2713';
+	/* ✓ */
+	font-weight: 700;
+}
+
+.ifs-deploy .ifs-deploy-status-failed {
+	@apply tw-border-danger-border tw-bg-danger-bg tw-text-danger-text;
+}
+
+.ifs-deploy .ifs-deploy-status-failed::before {
+	content: '\2715';
+	/* ✕ */
+	font-weight: 700;
+}
+
+.ifs-deploy .ifs-deploy-status-partial {
+	@apply tw-border-warning-border tw-bg-warning-bg tw-text-warning-text;
+}
+
+.ifs-deploy .ifs-deploy-status-rolledback {
+	@apply tw-border-grey-200 tw-bg-grey-50 tw-text-grey-800;
+}
+
+/* An object id shown beside a title — a chip, so it reads as metadata and not as part
+   of the title itself. */
+.ifs-deploy .dp-id {
+	@apply tw-ml-1.5 tw-inline-block tw-rounded tw-bg-grey-50 tw-px-1.5 tw-py-0.5;
+	@apply tw-align-middle tw-text-xs tw-font-medium tw-text-grey-600;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Count beside a heading ("In sync 4"). */
+.ifs-deploy .ifs-deploy-count {
+	@apply tw-ml-1.5 tw-inline-block tw-min-w-6 tw-rounded-full tw-bg-grey-50 tw-px-2 tw-py-0.5;
+	@apply tw-text-center tw-align-middle tw-text-sm tw-font-semibold tw-text-grey-800;
+}
+
+.ifs-deploy #ifs-deploy-test-result {
+	margin-left: 8px;
+	font-weight: 600;
+}
+
+.ifs-deploy .ifs-deploy-objects {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.ifs-deploy .ifs-deploy-object {
+	display: inline-block;
+}
+
+.ifs-deploy .ifs-deploy-object.is-ok::before {
+	content: "\2713";
+	/* check mark */
+	color: #007017;
+	margin-right: 6px;
+}
+
+.ifs-deploy .ifs-deploy-object.is-fail::before {
+	content: "\2717";
+	/* cross mark */
+	color: #b32d2e;
+	margin-right: 6px;
+}
+
+.ifs-deploy .ifs-deploy-object.is-fail {
+	color: #b32d2e;
+}
+
+/* ---------------------------------------------------------------------------
+   Before/after preview dialog (Pending Changes)
+
+   The red/green line colours come from wp-admin's own `table.diff` rules in
+   common.css, so a IFS Deploy diff looks exactly like a post-revision diff.
+   Everything below is only the surrounding dialog chrome.
+   --------------------------------------------------------------------------- */
+
+.ifs-deploy-modal[hidden] {
+	display: none;
+}
+
+.ifs-deploy-modal {
+	position: fixed;
+	inset: 0;
+	z-index: 100050;
+	/* above WP admin menu (9990) and admin bar (99999) */
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+}
+
+.ifs-deploy-modal-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(0, 0, 0, .7);
+}
+
+.ifs-deploy-modal-dialog {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	max-width: 1100px;
+	max-height: 100%;
+	background: #fff;
+	border-radius: 4px;
+	box-shadow: 0 6px 30px rgba(0, 0, 0, .3);
+}
+
+.ifs-deploy-modal-head,
+.ifs-deploy-modal-foot {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	padding: 14px 20px;
+}
+
+.ifs-deploy-modal-head {
+	gap: 12px;
+	border-bottom: 1px solid #dcdcde;
+}
+
+.ifs-deploy-modal-head h2 {
+	flex: 1 1 auto;
+	margin: 0;
+	font-size: 16px;
+	line-height: 1.4;
+	word-break: break-word;
+}
+
+.ifs-deploy-modal-close {
+	flex: 0 0 auto;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	background: none;
+	border: 0;
+	border-radius: 3px;
+	color: #646970;
+	font-size: 24px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.ifs-deploy-modal-close:hover,
+.ifs-deploy-modal-close:focus-visible {
+	background: #f0f0f1;
+	color: #1d2327;
+}
+
+/* The dialog body is the single scroll container for the whole diff. */
+.ifs-deploy-modal-body {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 20px;
+}
+
+.ifs-deploy-modal-foot {
+	justify-content: flex-end;
+	gap: 8px;
+	border-top: 1px solid #dcdcde;
+}
+
+/* Confirmation dialogs are much shorter than a diff. */
+.ifs-deploy-modal-dialog.ifs-deploy-modal-sm {
+	max-width: 620px;
+}
+
+/* Destructive confirm (rollback) reads red rather than "primary blue". */
+#ifs-deploy-confirm-ok.ifs-deploy-danger,
+#ifs-deploy-confirm-ok.ifs-deploy-danger:hover,
+#ifs-deploy-confirm-ok.ifs-deploy-danger:focus-visible {
+	background: #b32d2e;
+	border-color: #b32d2e;
+	color: #fff;
+}
+
+#ifs-deploy-confirm-ok.ifs-deploy-danger:hover {
+	background: #8c2224;
+	border-color: #8c2224;
+}
+
+#ifs-deploy-confirm-ok:disabled {
+	opacity: .6;
+	cursor: not-allowed;
+}
+
+.ifs-deploy-rollback-meta {
+	margin: 0 0 14px;
+	color: #646970;
+}
+
+/* Object switcher: one clickable name per affected object. */
+.ifs-deploy-rollback-objects {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: 0 0 16px;
+	padding: 0 0 16px;
+	border-bottom: 1px solid #dcdcde;
+	list-style: none;
+}
+
+.ifs-deploy-rollback-objects li {
+	margin: 0;
+}
+
+.ifs-deploy-rollback-object {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 3px;
+	cursor: pointer;
+	font-size: 13px;
+	text-align: left;
+}
+
+.ifs-deploy-rollback-object:hover {
+	background: #fff;
+	border-color: #2271b1;
+}
+
+.ifs-deploy-rollback-object.is-active {
+	background: #fff;
+	border-color: #2271b1;
+	box-shadow: inset 0 0 0 1px #2271b1;
+	cursor: default;
+}
+
+.ifs-deploy-rollback-object-title {
+	font-weight: 600;
+}
+
+.ifs-deploy-rollback-heading {
+	margin: 0 0 4px;
+	font-size: 15px;
+}
+
+.ifs-deploy-rollback-panel {
+	min-height: 80px;
+}
+
+.ifs-deploy-rollback-ask {
+	margin: 16px 0 0;
+	padding-top: 14px;
+	border-top: 1px solid #dcdcde;
+	font-weight: 600;
+}
+
+/* Stop the page behind the dialog from scrolling. */
+body.ifs-deploy-modal-open {
+	overflow: hidden;
+}
+
+@media screen and (max-width: 782px) {
+	.ifs-deploy-modal {
+		padding: 0;
+	}
+
+	.ifs-deploy-modal-dialog {
+		max-width: none;
+		height: 100%;
+		border-radius: 0;
+	}
+}
+
+/* --- Role management --------------------------------------------------------- */
+
+/* The permission columns are switches: narrow, centred, and equal width. */
+.ifs-deploy .ifs-deploy-roles thead th:first-child,
+.ifs-deploy .ifs-deploy-roles tbody th {
+	width: 22%;
+	text-align: left;
+}
+
+.ifs-deploy .ifs-deploy-roles tbody td {
+	text-align: center;
+	vertical-align: middle;
+}
+
+.ifs-deploy .dp-role-name {
+	@apply tw-block tw-font-semibold tw-text-grey-900;
+}
+
+/* Searchable user pickers (Role Management → Specific users). */
+.ifs-deploy .ifs-deploy-user-picker {
+	max-width: 520px;
+}
+
+.ifs-deploy .ifs-deploy-chips {
+	@apply tw-m-0 tw-mt-2 tw-flex tw-flex-wrap tw-gap-1.5 tw-p-0;
+	list-style: none;
+}
+
+.ifs-deploy .ifs-deploy-chip-item {
+	@apply tw-m-0 tw-inline-flex tw-items-center tw-gap-1.5 tw-rounded-full;
+	@apply tw-border tw-border-grey-200 tw-bg-grey-50 tw-py-1 tw-pl-3 tw-pr-1 tw-text-sm tw-text-grey-800;
+}
+
+.ifs-deploy .ifs-deploy-chip-remove {
+	@apply tw-flex tw-h-5 tw-w-5 tw-items-center tw-justify-center tw-p-0;
+	@apply tw-rounded-full tw-border-0 tw-bg-transparent tw-text-grey-600;
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+	transition: background-color .12s ease, color .12s ease;
+}
+
+.ifs-deploy .ifs-deploy-chip-remove:hover,
+.ifs-deploy .ifs-deploy-chip-remove:focus-visible {
+	@apply tw-bg-danger-border tw-text-danger-text tw-outline-none;
+}
+
+
+/* ===========================================================================
+   P2 — Forms, controls, tables
+   ===========================================================================
+   Two things worth knowing before editing:
+
+   1. `.dp-input` is a class on the element, but the bare-element selectors below
+      (`input[type="text"]`, `select`, `textarea`) also match, so a control added
+      later without the class still looks right. That is deliberate — several inputs
+      here come from `submit_button()` and jQuery UI, which we do not control.
+
+   2. The toggle switch is CSS-only, applied to a real `<input type="checkbox">`.
+      Nothing about the posted form data changes, which is what makes it safe to swap
+      in on the role matrix (see SettingsPage::toggle()).
+   =========================================================================== */
+
+/* --- Text controls -------------------------------------------------------- */
+
+.ifs-deploy .dp-input,
+.ifs-deploy input[type="text"],
+.ifs-deploy input[type="url"],
+.ifs-deploy input[type="email"],
+.ifs-deploy input[type="password"],
+.ifs-deploy input[type="search"],
+.ifs-deploy input[type="number"],
+.ifs-deploy textarea,
+.ifs-deploy select {
+	@apply tw-w-full tw-max-w-lg tw-rounded-md tw-border tw-border-grey-500 tw-bg-white;
+	@apply tw-px-3 tw-py-2 tw-text-md tw-text-grey-900;
+	min-height: 36px;
+	box-shadow: none;
+	transition: border-color .12s ease, box-shadow .12s ease;
+}
+
+.ifs-deploy textarea {
+	@apply tw-py-2;
+	min-height: 90px;
+	line-height: 1.5;
+}
+
+/*
+ * Text fields keep a focus ring. Unlike a button, a text field gives no other signal
+ * that it is the thing your keystrokes will land in, and the caret alone is easy to
+ * lose on a long form.
+ */
+.ifs-deploy .dp-input:focus,
+.ifs-deploy input[type="text"]:focus,
+.ifs-deploy input[type="url"]:focus,
+.ifs-deploy input[type="email"]:focus,
+.ifs-deploy input[type="password"]:focus,
+.ifs-deploy input[type="search"]:focus,
+.ifs-deploy input[type="number"]:focus,
+.ifs-deploy textarea:focus,
+.ifs-deploy select:focus {
+	@apply tw-border-grey-900 tw-shadow-focus tw-outline-none;
+}
+
+/* grey-600, not grey-500: placeholder is text and needs 4.5:1. grey-500 is the
+   control-border colour at 3.91:1 and fails as text. */
+.ifs-deploy .dp-input::placeholder,
+.ifs-deploy textarea::placeholder {
+	@apply tw-text-grey-600;
+}
+
+.ifs-deploy .dp-input-mono {
+	@apply tw-text-sm;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* A credential you copy out, not a field you fill in. */
+.ifs-deploy .dp-input.is-readonly {
+	@apply tw-border-grey-200 tw-bg-grey-50 tw-text-grey-800;
+	cursor: text;
+}
+
+.ifs-deploy .dp-input:disabled,
+.ifs-deploy select:disabled {
+	@apply tw-cursor-not-allowed tw-border-grey-200 tw-bg-grey-50 tw-text-grey-400;
+}
+
+/* Native arrow, drawn rather than relying on the platform's. */
+.ifs-deploy select {
+	@apply tw-max-w-xs tw-appearance-none tw-bg-no-repeat tw-pr-9;
+	background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%235A6063' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+	background-position: right 10px center;
+	background-size: 16px 16px;
+}
+
+/* --- Field rows ----------------------------------------------------------- */
+
+.ifs-deploy .dp-form {
+	@apply tw-max-w-4xl;
+}
+
+.ifs-deploy .dp-field {
+	@apply tw-mb-5 tw-grid tw-items-start tw-gap-1;
+}
+
+/* Label beside the control once there is room for it. */
+@media (min-width: 783px) {
+	.ifs-deploy .dp-field {
+		@apply tw-gap-4;
+		grid-template-columns: 180px minmax(0, 1fr);
+	}
+
+	.ifs-deploy .dp-field-label {
+		padding-top: 8px;
+	}
+}
+
+.ifs-deploy .dp-field-label {
+	@apply tw-text-md tw-font-medium tw-text-grey-900;
+}
+
+.ifs-deploy .dp-field-control {
+	@apply tw-min-w-0;
+}
+
+.ifs-deploy .dp-help {
+	@apply tw-m-0 tw-mt-1.5 tw-max-w-2xl tw-text-sm tw-text-grey-600;
+}
+
+/* Overrides core's `.description`, which the diff panels and log tables still use. */
+.ifs-deploy .description {
+	@apply tw-text-sm tw-text-grey-600;
+}
+
+.ifs-deploy .dp-form-actions {
+	@apply tw-mt-6 tw-flex tw-flex-wrap tw-items-center tw-gap-3;
+}
+
+/* `submit_button()` wraps in <p class="submit"> unless told not to; neutralise it
+   for the cases we cannot pass $wrap = false. */
+.ifs-deploy .dp-form-actions p.submit {
+	@apply tw-m-0 tw-p-0;
+}
+
+/*
+ * A whole <form> sitting inside the shared actions row — Regenerate Credentials posts a
+ * different action from Save Settings, so it cannot share a form with it.
+ *
+ * `inline-flex` and not `contents`: admin.js shows and hides this with `$.toggle()`,
+ * which restores `display: ''` — i.e. whatever the stylesheet says. It has to be a value
+ * that behaves as a flex item.
+ */
+.ifs-deploy .dp-inline-form {
+	@apply tw-m-0 tw-inline-flex tw-items-center;
+}
+
+.ifs-deploy .dp-inline-result {
+	@apply tw-text-md tw-text-grey-600;
+}
+
+/* An explanatory aside inside a form — what a setting will actually do. */
+.ifs-deploy .dp-note {
+	@apply tw-my-5 tw-max-w-3xl tw-rounded-md tw-border tw-border-grey-200 tw-bg-grey-25 tw-p-4;
+}
+
+.ifs-deploy .dp-note> :first-child {
+	@apply tw-mt-0;
+}
+
+.ifs-deploy .dp-note> :last-child {
+	@apply tw-mb-0;
+}
+
+.ifs-deploy .dp-list {
+	@apply tw-my-2 tw-list-disc tw-pl-5 tw-text-sm tw-text-grey-600;
+}
+
+.ifs-deploy .dp-list li {
+	@apply tw-mb-1;
+}
+
+/* Observed-address list: monospace values with their status alongside. */
+.ifs-deploy .dp-observed {
+	@apply tw-list-none tw-pl-0;
+}
+
+.ifs-deploy .dp-observed li {
+	@apply tw-mb-1.5 tw-flex tw-flex-wrap tw-items-center tw-gap-2;
+}
+
+/* --- Choice cards (radio) ------------------------------------------------- */
+
+.ifs-deploy .dp-choices {
+	@apply tw-mb-6 tw-grid tw-gap-3;
+}
+
+@media (min-width: 783px) {
+	.ifs-deploy .dp-choices {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+.ifs-deploy .dp-choice {
+	@apply tw-flex tw-cursor-pointer tw-items-start tw-gap-3 tw-rounded-lg;
+	@apply tw-border tw-border-grey-200 tw-bg-white tw-p-4;
+	transition: border-color .12s ease, background-color .12s ease;
+}
+
+.ifs-deploy .dp-choice:hover {
+	@apply tw-border-grey-500;
+}
+
+.ifs-deploy .dp-choice.is-selected {
+	@apply tw-border-grey-900 tw-bg-grey-50;
+}
+
+/* The radio itself stays a real radio — only its size and colour are ours. */
+.ifs-deploy .dp-choice input[type="radio"] {
+	@apply tw-mt-0.5 tw-h-4 tw-w-4 tw-flex-none;
+	accent-color: #191B1C;
+}
+
+.ifs-deploy .dp-choice-body {
+	@apply tw-flex tw-min-w-0 tw-flex-col tw-gap-1;
+}
+
+.ifs-deploy .dp-choice-label {
+	@apply tw-text-md tw-font-semibold tw-text-grey-900;
+}
+
+.ifs-deploy .dp-choice-description {
+	@apply tw-text-sm tw-text-grey-600;
+}
+
+/* --- Toggle switch -------------------------------------------------------- */
+
+/* `relative` positions the transparent checkbox that is stretched over the track. */
+.ifs-deploy .dp-toggle {
+	@apply tw-relative tw-inline-flex tw-cursor-pointer tw-items-center tw-gap-2.5 tw-align-middle;
+}
+
+/*
+ * The checkbox is not hidden with display:none — that would take it out of the tab
+ * order and make the control unreachable by keyboard. It is made transparent and
+ * stretched over the track instead, so it is still the thing that receives focus and
+ * the click.
+ */
+.ifs-deploy .dp-toggle input[type="checkbox"] {
+	@apply tw-absolute tw-inset-0 tw-m-0 tw-h-full tw-w-full tw-cursor-pointer tw-opacity-0;
+	appearance: none;
+}
+
+/* grey-500, not grey-400: the off state is a control boundary and needs 3:1 against
+   the panel behind it (WCAG 1.4.11). grey-400 is 2.56:1 and fails. */
+.ifs-deploy .dp-toggle-track {
+	@apply tw-relative tw-block tw-flex-none tw-rounded-full tw-bg-grey-500;
+	width: 36px;
+	height: 20px;
+	transition: background-color .15s ease;
+}
+
+.ifs-deploy .dp-toggle-knob {
+	@apply tw-absolute tw-block tw-rounded-full tw-bg-white;
+	top: 2px;
+	left: 2px;
+	width: 16px;
+	height: 16px;
+	box-shadow: 0 1px 2px rgba(25, 27, 28, .25);
+	transition: transform .15s ease;
+}
+
+/*
+ * ON is GREEN, not near-black.
+ *
+ * grey-900 against a grey-500 off state is a lightness difference only, and at 36×20px
+ * that is genuinely hard to read at a glance — two dark pills, and you have to find the
+ * knob to know which is which. A hue change carries the state on its own.
+ *
+ * success-text (#2F6B4F) rather than a brighter green: the track IS the control, so it
+ * needs 3:1 against the panel behind it (WCAG 1.4.11) AND the white knob needs 3:1
+ * against the track. This colour is already in the palette at 4.5:1 on white, so both
+ * hold with room to spare — asserted in tests/contrast.php.
+ */
+.ifs-deploy .dp-toggle input:checked~.dp-toggle-track {
+	@apply tw-bg-success-text;
+}
+
+.ifs-deploy .dp-toggle input:checked~.dp-toggle-track .dp-toggle-knob {
+	transform: translateX(16px);
+}
+
+/* Keyboard focus only — see the focus note in the buttons section. */
+.ifs-deploy .dp-toggle input:focus-visible~.dp-toggle-track {
+	@apply tw-shadow-focus;
+}
+
+.ifs-deploy .dp-toggle.is-disabled {
+	@apply tw-cursor-not-allowed;
+}
+
+.ifs-deploy .dp-toggle.is-disabled input {
+	@apply tw-cursor-not-allowed;
+}
+
+/*
+ * Administrator rows: on, but visibly not yours to change.
+ *
+ * Pale GREEN rather than grey, now that green means on. Grey here sat directly beside
+ * editable green rows in the role matrix and read as off — which is the opposite of what
+ * it means. The muted tint plus the not-allowed cursor carries "locked" instead.
+ *
+ * The white knob does not reach 3:1 on this tint, which is accepted: a disabled control
+ * is exempt from 1.4.11, the knob keeps its shadow, and its POSITION is the state.
+ */
+.ifs-deploy .dp-toggle.is-disabled input:checked~.dp-toggle-track {
+	@apply tw-bg-success-border;
+}
+
+.ifs-deploy .dp-toggle-label {
+	@apply tw-text-md tw-text-grey-800;
+}
+
+.ifs-deploy .dp-toggle-list {
+	@apply tw-m-0 tw-mt-3 tw-flex tw-flex-wrap tw-gap-x-6 tw-gap-y-2.5 tw-border-0 tw-p-0;
+}
+
+/* --- Tables --------------------------------------------------------------- */
+
+/*
+ * `.wp-list-table` is included so Pending Changes, History, Compare and Logs all
+ * improve without their markup changing. `.dp-table` is the same look for tables we
+ * build fresh. Core's own rules are (0,2,0) and this sheet loads later, so these win
+ * on source order — do not collapse them to a single class.
+ */
+/*
+ * Scroll container ONLY — the border lives on the table itself (below), so a wrapped
+ * table and a bare one look identical and there is never a doubled frame.
+ */
+.ifs-deploy .dp-table-wrap {
+	@apply tw-overflow-x-auto;
+}
+
+/*
+ * The light frame, on the table.
+ *
+ * `border-collapse: SEPARATE` with zero spacing, not `collapse`. A collapsed table
+ * ignores `border-radius` on its own corner cells, so the frame would render with square
+ * corners poking out past the rounded border — and `overflow: hidden` is not reliably
+ * honoured on a `<table>`, so that usual trick cannot fix it either. With `separate` the
+ * corners can be rounded explicitly (see below). There are no cell borders left after the
+ * zebra change, so nothing else is affected by the switch.
+ */
+.ifs-deploy .dp-table,
+.ifs-deploy .wp-list-table {
+	@apply tw-w-full tw-rounded-lg tw-border tw-border-grey-200 tw-bg-white tw-text-md;
+	border-collapse: separate;
+	border-spacing: 0;
+	box-shadow: none;
+}
+
+/*
+ * Round the corner cells to match the frame. Needed on the bottom pair because the last
+ * row is often the zebra tint, which would otherwise square off the corner it sits in;
+ * the top pair is done for the same reason should a header tint ever come back.
+ */
+.ifs-deploy .dp-table thead tr:first-child>*:first-child,
+.ifs-deploy .wp-list-table thead tr:first-child>*:first-child {
+	border-top-left-radius: theme(borderRadius.lg);
+}
+
+.ifs-deploy .dp-table thead tr:first-child>*:last-child,
+.ifs-deploy .wp-list-table thead tr:first-child>*:last-child {
+	border-top-right-radius: theme(borderRadius.lg);
+}
+
+.ifs-deploy .dp-table tbody tr:last-child>*:first-child,
+.ifs-deploy .wp-list-table tbody tr:last-child>*:first-child {
+	border-bottom-left-radius: theme(borderRadius.lg);
+}
+
+.ifs-deploy .dp-table tbody tr:last-child>*:last-child,
+.ifs-deploy .wp-list-table tbody tr:last-child>*:last-child {
+	border-bottom-right-radius: theme(borderRadius.lg);
+}
+
+/* Header sits on white with a single rule under it; the rows carry the tint. */
+.ifs-deploy .dp-table thead th,
+.ifs-deploy .wp-list-table thead th,
+.ifs-deploy .wp-list-table thead td {
+	@apply tw-border-0 tw-border-b tw-border-grey-200 tw-bg-white;
+	@apply tw-px-4 tw-py-3 tw-text-left tw-align-bottom tw-text-sm tw-font-semibold tw-text-grey-900;
+}
+
+/*
+ * NO row borders. Rows are separated by the zebra stripe alone.
+ *
+ * An earlier pass had borders AND a hover tint AND no stripe, on the reasoning that a
+ * stripe would be a third competing signal. That was the wrong half to drop: with the
+ * borders gone the stripe does the separating, the hover tint does the pointing, and
+ * the status pills are the only colour left in the table.
+ */
+.ifs-deploy .dp-table tbody th,
+.ifs-deploy .dp-table tbody td,
+.ifs-deploy .wp-list-table tbody th,
+.ifs-deploy .wp-list-table tbody td {
+	@apply tw-border-0 tw-px-4 tw-py-3.5 tw-align-middle tw-text-grey-800;
+}
+
+/* `.striped`/`.alternate` come from core; `:nth-child` covers the tables we build. */
+.ifs-deploy .dp-table tbody tr:nth-child(odd),
+.ifs-deploy .wp-list-table.striped>tbody> :nth-child(odd),
+.ifs-deploy .wp-list-table>tbody>.alternate {
+	@apply tw-bg-grey-25;
+}
+
+/* Hover wins over the stripe — hence grey-50 against the stripe's grey-25. */
+.ifs-deploy .dp-table tbody tr:hover>*,
+.ifs-deploy .wp-list-table tbody tr:hover>*,
+.ifs-deploy .wp-list-table.striped>tbody>tr:hover>* {
+	@apply tw-bg-grey-50;
+}
+
+/* Object titles are the scan target in every one of these tables. */
+.ifs-deploy .dp-table tbody th strong,
+.ifs-deploy .wp-list-table tbody td strong {
+	@apply tw-font-semibold tw-text-grey-900;
+}
+
+/* Deployment uuids and log ids are emitted as <code>; same chip as .dp-id. */
+.ifs-deploy .dp-table tbody code,
+.ifs-deploy .wp-list-table tbody code {
+	@apply tw-inline-block tw-rounded tw-bg-grey-50 tw-px-1.5 tw-py-0.5 tw-text-xs tw-text-grey-600;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* A one-line explanation under a column label. */
+.ifs-deploy .dp-th-hint {
+	@apply tw-mt-1 tw-block tw-text-xs tw-font-normal tw-normal-case tw-text-grey-600;
+	letter-spacing: 0;
+}
+
+.ifs-deploy .wp-list-table .check-column {
+	@apply tw-w-10 tw-pr-0;
+}
+
+.ifs-deploy .wp-list-table td.check-column input,
+.ifs-deploy .wp-list-table th.check-column input {
+	@apply tw-m-0;
+	accent-color: #191B1C;
+}
+
+/* Empty-state cell — a single wide td with a sentence in it. */
+.ifs-deploy .dp-table tbody tr td[colspan],
+.ifs-deploy .wp-list-table tbody tr td[colspan] {
+	@apply tw-py-8 tw-text-center tw-text-grey-600;
+}
+
+/* jQuery UI autocomplete ships no admin theme, so the results list needs styling.
+   Not scoped to .ifs-deploy: the menu is appended to <body>. */
+.ui-autocomplete.ui-menu {
+	max-height: 260px;
+	overflow-y: auto;
+	padding: 4px 0;
+	margin: 0;
+	list-style: none;
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
+	z-index: 100100;
+	/* above the preview dialog */
+}
+
+.ui-autocomplete.ui-menu .ui-menu-item {
+	padding: 0;
+	margin: 0;
+}
+
+.ui-autocomplete.ui-menu .ui-menu-item-wrapper {
+	display: block;
+	padding: 7px 12px;
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+.ui-autocomplete.ui-menu .ui-menu-item-wrapper.ui-state-active {
+	background: #2271b1;
+	color: #fff;
+}
+
+.ifs-deploy .ifs-deploy-filter {
+	margin: 12px 0;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* --- Logs & Diagnostics ------------------------------------------------------ */
+
+.ifs-deploy .ifs-deploy-kv {
+	margin: 12px 0 24px;
+	max-width: 1100px;
+}
+
+.ifs-deploy .ifs-deploy-kv th {
+	width: 260px;
+	text-align: left;
+}
+
+.ifs-deploy .ifs-deploy-kv th,
+.ifs-deploy .ifs-deploy-kv td {
+	padding: 10px 12px;
+	vertical-align: top;
+}
+
+.ifs-deploy .ifs-deploy-kv-problem {
+	color: #b32d2e;
+	font-weight: 600;
+}
+
+.ifs-deploy .ifs-deploy-log-message {
+	word-break: break-word;
+}
+
+.ifs-deploy .ifs-deploy-log-context {
+	margin: 6px 0 0;
+	padding: 8px 10px;
+	background: #f6f7f7;
+	border-left: 3px solid #c3c4c7;
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 200px;
+	overflow: auto;
+}
+
+/* Compare & Sync pairs a review button with a push button in its actions column.
+   Both are `button-small`, and stretching them to a shared width keeps the pair
+   looking deliberate — the column is too narrow (table-layout: fixed, 6 columns)
+   for them to sit side by side, and content-sized buttons of different widths read
+   as a glitch. */
+.ifs-deploy .ifs-deploy-row-actions {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 6px;
+}
+
+.ifs-deploy .ifs-deploy-row-actions .button {
+	width: 100%;
+	text-align: center;
+	white-space: normal;
+}
+
+.ifs-deploy-preview-loading {
+	margin: 0;
+	color: #646970;
+	font-style: italic;
+}
+
+.ifs-deploy .ifs-deploy-preview-head {
+	margin-bottom: 16px;
+}
+
+.ifs-deploy .ifs-deploy-preview-legend {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin: 10px 0 0;
+	color: #646970;
+	font-size: 12px;
+}
+
+.ifs-deploy .ifs-deploy-legend-incoming,
+.ifs-deploy .ifs-deploy-legend-current {
+	padding: 2px 8px;
+	border-radius: 3px;
+}
+
+/* Incoming (Staging) is green and on the left; current (Production) is red and on
+   the right. Named by meaning, not position, so the pair cannot drift out of sync
+   with the column order. */
+.ifs-deploy .ifs-deploy-legend-incoming {
+	background: #edfaef;
+	color: #005c12;
+}
+
+.ifs-deploy .ifs-deploy-legend-current {
+	background: #fcf0f1;
+	color: #8c2224;
+}
+
+.ifs-deploy .ifs-deploy-diff-group {
+	margin: 22px 0 8px;
+	padding-bottom: 6px;
+	border-bottom: 1px solid #dcdcde;
+	font-size: 13px;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+	color: #646970;
+}
+
+.ifs-deploy .ifs-deploy-diff-field {
+	margin-bottom: 18px;
+}
+
+.ifs-deploy .ifs-deploy-diff-field h4 {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin: 0 0 6px;
+}
+
+.ifs-deploy .ifs-deploy-diff-field h4 code {
+	background: #fff;
+	border: 1px solid #dcdcde;
+	font-size: 12px;
+}
+
+.ifs-deploy .ifs-deploy-diff-note {
+	margin: 0 0 6px;
+}
+
+/* Wide values (block markup, serialised ACF) scroll sideways rather than stretch
+   the dialog. Only overflow-x: the dialog body owns vertical scrolling, so a
+   nested vertical scroller here would give the user two scrollbars to fight.
+   The overflow also sits on the wrapper, not on table.diff — a display:block
+   table loses the <col> widths core emits and the split view collapses. */
+.ifs-deploy .ifs-deploy-diff-body {
+	overflow-x: auto;
+	background: #fff;
+	border: 1px solid #dcdcde;
+}
+
+.ifs-deploy .ifs-deploy-diff-body table.diff {
+	margin: 0;
+}
+
+.ifs-deploy .ifs-deploy-diff-body table.diff td {
+	word-break: break-word;
+}
+
+/* ---------------------------------------------------------------------------
+   Reorientation — READ TOGETHER WITH DiffRenderer::diff_table()
+
+   IFS Deploy shows Staging on the LEFT and Production on the RIGHT, so it calls
+   wp_text_diff( $staging, $production ). Column order follows argument order, and
+   there is no way to change one without the other.
+
+   Core, however, hard-codes its left column as "deleted" and its right as "added":
+   left gets red + a dashicons-minus glyph + screen-reader text "Deleted:", right
+   gets green + dashicons-plus + "Added:". For our orientation all three are
+   backwards — the incoming Staging text would read as a red deletion.
+
+   Everything below therefore re-orients those three artefacts, scoped to
+   `.ifs-deploy-diff-body` so core's own revision screens are untouched:
+   LEFT = green / plus = what you are about to publish,
+   RIGHT = red / minus = what it replaces.
+
+   Colours are core's own values from wp-admin/css/revisions.css, simply swapped.
+   If the argument order in diff_table() ever changes, all of this must change too.
+   --------------------------------------------------------------------------- */
+
+/* LEFT column = Staging (incoming) → green. */
+.ifs-deploy .ifs-deploy-diff-body .diff-deletedline {
+	background-color: #edfaef;
+}
+
+.ifs-deploy .ifs-deploy-diff-body .diff-deletedline del {
+	background-color: #68de7c;
+	text-decoration: none;
+}
+
+/* RIGHT column = Production (current) → red. */
+.ifs-deploy .ifs-deploy-diff-body .diff-addedline {
+	background-color: #fcf0f1;
+}
+
+.ifs-deploy .ifs-deploy-diff-body .diff-addedline ins {
+	background-color: #ffabaf;
+	text-decoration: none;
+}
+
+/* Swap the gutter glyphs: plus on the incoming side, minus on the current one. */
+.ifs-deploy .ifs-deploy-diff-body .diff-deletedline .dashicons-minus::before {
+	content: "\f132";
+	/* dashicons-plus */
+}
+
+.ifs-deploy .ifs-deploy-diff-body .diff-addedline .dashicons-plus::before {
+	content: "\f460";
+	/* dashicons-minus */
+}
+
+/* Core nudges the plus glyph down a fraction because it is not vertically centred,
+   and pins that nudge to its right column. The plus now lives on the left, so the
+   nudge has to move with it. */
+.ifs-deploy .ifs-deploy-diff-body .diff-deletedline .dashicons {
+	top: 0.92857143em;
+}
+
+.ifs-deploy .ifs-deploy-diff-body .diff-addedline .dashicons {
+	top: 0.85714286em;
+}
+
+/* Core labels each cell "Deleted:"/"Added:" for screen readers. Those strings are
+   inverted here and cannot be corrected from CSS, so they are removed from the
+   accessibility tree entirely (display:none does that) rather than left to
+   announce the opposite of the truth. The visible legend above the diff states
+   which column is which, and it is real text, so it is announced too. */
+.ifs-deploy .ifs-deploy-diff-body .diff-deletedline>.screen-reader-text,
+.ifs-deploy .ifs-deploy-diff-body .diff-addedline>.screen-reader-text {
+	display: none;
+}
+
+.ifs-deploy .ifs-deploy-diff-plain {
+	table-layout: fixed;
+	width: 100%;
+}
+
+.ifs-deploy .ifs-deploy-diff-blank,
+.ifs-deploy .ifs-deploy-diff-gutter {
+	background: #fff;
+}
+
+.ifs-deploy .ifs-deploy-diff-gutter {
+	width: 2%;
+}
+
+.ifs-deploy .ifs-deploy-diff-technical {
+	margin-top: 22px;
+	padding-top: 12px;
+	border-top: 1px solid #dcdcde;
+}
+
+.ifs-deploy .ifs-deploy-diff-technical summary {
+	cursor: pointer;
+	color: #646970;
+	font-size: 12px;
+}
+
+.ifs-deploy .ifs-deploy-diff-technical[open] summary {
+	margin-bottom: 12px;
+}
+
+.ifs-deploy .ifs-deploy-preview-message {
+	margin: 0;
+	padding: 10px 12px;
+	border-radius: 3px;
+	background: #fff;
+	border-left: 4px solid #dcdcde;
+}
+
+.ifs-deploy .ifs-deploy-preview-message.is-error {
+	border-left-color: #b32d2e;
+	color: #8c2224;
+}
+
+.ifs-deploy .ifs-deploy-preview-message.is-info {
+	border-left-color: #72aee6;
+}
+
+.ifs-deploy .ifs-deploy-chip {
+	display: inline-block;
+	padding: 1px 8px;
+	border-radius: 10px;
+	background: #f0f0f1;
+	color: #50575e;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .03em;
+}
+
+.ifs-deploy .ifs-deploy-chip-added {
+	background: #edfaef;
+	color: #005c12;
+}
+
+.ifs-deploy .ifs-deploy-chip-changed {
+	background: #fcf9e8;
+	color: #7a5c00;
+}
+
+.ifs-deploy .ifs-deploy-chip-removed {
+	background: #fcf0f1;
+	color: #8c2224;
+}
+
+.ifs-deploy .ifs-deploy-chip-kept {
+	background: #f0f0f1;
+	color: #50575e;
+}
+
+
+/* ===========================================================================
+   P1 — Page shell, notices, cards, buttons
+   ===========================================================================
+   Two deliberate choices here:
+
+   1. We RESTYLE WordPress's own `.button` / `.button-primary` inside `.ifs-deploy`
+      rather than introducing a `.dp-btn`. Every button in the plugin — including the
+      ones `submit_button()` generates and the ones admin.js targets by id — picks up
+      the new look with zero markup churn and zero risk to the JS contracts in
+      DESIGN.md §11.3.
+
+      Specificity note: core ships `.wp-core-ui .button` (0,2,0). Ours is
+      `.ifs-deploy .button` (also 0,2,0), and this stylesheet is enqueued after
+      core's, so ours wins on source order. Do NOT "simplify" these to a single
+      class — they would then lose to core.
+
+   2. Existing class names are reused (`.ifs-deploy-card`, `.ifs-deploy-cards`), so
+      Dashboard AND Compare both improve without either one's markup changing.
+   =========================================================================== */
+
+/* --- Screen header -------------------------------------------------------- */
+
+/*
+ * Core reserves space above `.wrap` for the notices it relocates. With the notices now
+ * moved to our own marker the gap is dead space above the brand bar.
+ */
+.ifs-deploy.dp-screen {
+	@apply tw-mr-5 tw-mt-0 tw-pt-6;
+}
+
+.ifs-deploy .dp-brand {
+	@apply tw-flex tw-items-center tw-gap-3 tw-pb-4;
+}
+
+/*
+ * The wordmark is text — no bundled artwork. It carries the heading weight the screen
+ * needs on its own, so nothing here depends on an image being present.
+ */
+.ifs-deploy .dp-brand-name {
+	@apply tw-flex tw-items-center tw-text-lg tw-font-semibold tw-text-grey-900;
+}
+
+/*
+ * Which side of the pair this is. A pill rather than plain text, because mistaking
+ * Production for Staging is the single most expensive misreading on this screen.
+ */
+.ifs-deploy .dp-brand-role {
+	@apply tw-inline-flex tw-items-center tw-rounded-full tw-border tw-px-2 tw-py-0.5;
+	@apply tw-text-xs tw-font-medium tw-uppercase;
+	letter-spacing: 0.06em;
+}
+
+.ifs-deploy .dp-brand-role--staging {
+	@apply tw-border-grey-200 tw-bg-grey-50 tw-text-grey-600;
+}
+
+.ifs-deploy .dp-brand-role--production {
+	@apply tw-border-warning-border tw-bg-warning-bg tw-text-warning-text;
+}
+
+/*
+ * WordPress relocates every admin notice to the `wp-header-end` marker. It is a real
+ * <hr>, so hide it without letting it collapse the spacing around the notices that
+ * land immediately after it.
+ */
+.ifs-deploy hr.wp-header-end {
+	@apply tw-invisible tw-m-0 tw-h-0 tw-border-0;
+}
+
+/* Notices sit between the marker and our content. */
+.ifs-deploy .notice {
+	@apply tw-my-3 tw-rounded-md tw-border-grey-200;
+	box-shadow: none;
+}
+
+/* --- Environment pair ----------------------------------------------------- */
+
+/*
+ * Staging → Production, drawn as a pair.
+ *
+ * `1fr auto 1fr` rather than flex: the two cards must be EQUAL width whatever their
+ * content, or a long hostname on one side makes the pair look like a hierarchy instead of
+ * two ends of one relationship. The middle column takes only what the direction needs.
+ *
+ * max-width caps it on a wide monitor — stretched to 2000px the two cards read as unrelated
+ * panels rather than as a pair.
+ */
+.ifs-deploy .dp-env {
+	@apply tw-my-5 tw-grid tw-items-stretch tw-gap-4;
+	grid-template-columns: 1fr;
+	max-width: 760px;
+}
+
+@media (min-width: 783px) {
+	.ifs-deploy .dp-env {
+		grid-template-columns: 1fr auto 1fr;
+	}
+}
+
+/*
+ * Card surface: a very light border and a soft ambient shadow.
+ *
+ * Both are literal values rather than palette tokens, deliberately. #EAEAEA is lighter than
+ * grey-200, and the shadow has no offset — an even glow on all four sides rather than a
+ * drop — so neither is expressible in the existing scale. Adding tokens for a decorative
+ * edge would put colours in the palette that must never be used for anything meaningful,
+ * which is a worse trade than two literals with a comment.
+ *
+ * Exempt from the contrast rules on purpose: a card boundary is decoration, not a control
+ * boundary, and WCAG 1.4.11 applies to what you can operate. Where an edge DOES carry
+ * meaning it keeps a token that passes — `.is-self` below marks the site you are looking at
+ * and therefore stays on grey-500 at 3:1.
+ *
+ * Shared with `.ifs-deploy-card` further down, so the two card kinds cannot drift apart.
+ */
+.ifs-deploy .dp-env-card {
+	@apply tw-relative tw-flex tw-flex-col tw-items-center tw-gap-1 tw-text-center;
+	@apply tw-rounded-lg tw-bg-white tw-px-5 tw-py-6;
+	border: 1px solid #EAEAEA;
+}
+
+/*
+ * THIS site, given a heavier border as well as the badge.
+ *
+ * The badge is the explicit signal, but border weight is read before any text is — which
+ * is the whole point on a screen someone opens on the wrong site by mistake. grey-500 is
+ * the control-border token, so it is already 3:1 against the panel.
+ *
+ * More specific than the base rule, which is the only reason it wins: the base sets `border`
+ * as a shorthand. Asserted in render-test.php, because losing it fails silently — the pair
+ * simply stops telling you which site you are on.
+ */
+.ifs-deploy .dp-env-card.is-self {
+	@apply tw-border-grey-500;
+}
+
+.ifs-deploy .dp-env-you {
+	@apply tw-absolute tw-right-3 tw-top-3;
+	@apply tw-rounded-full tw-bg-grey-900 tw-px-2 tw-py-0.5 tw-text-xs tw-font-semibold tw-uppercase tw-text-white;
+	letter-spacing: 0.04em;
+}
+
+/* The tinted tile. Both tints are existing semantic tokens, and the pairing is meaningful
+   rather than decorative: green for the place it is safe to experiment, amber for the one
+   that is live. Both are asserted in tests/contrast.php. */
+.ifs-deploy .dp-env-icon {
+	@apply tw-mb-2 tw-inline-flex tw-h-10 tw-w-10 tw-items-center tw-justify-center tw-rounded-md;
+}
+
+.ifs-deploy .dp-env-icon-staging {
+	@apply tw-bg-success-bg tw-text-success-text;
+}
+
+.ifs-deploy .dp-env-icon-production {
+	@apply tw-bg-warning-bg tw-text-warning-text;
+}
+
+.ifs-deploy .dp-env-eyebrow {
+	@apply tw-text-xs tw-font-medium tw-uppercase tw-text-grey-600;
+	letter-spacing: 0.1em;
+}
+
+.ifs-deploy .dp-env-name {
+	@apply tw-text-xl tw-font-semibold tw-text-grey-900;
+	letter-spacing: -0.01em;
+}
+
+/* A hostname has no spaces, so it needs an explicit break rule or it widens the grid
+   column past its share and the pair stops being symmetrical. */
+.ifs-deploy .dp-env-meta {
+	@apply tw-break-all tw-text-base tw-text-grey-800;
+}
+
+.ifs-deploy .dp-env-role {
+	@apply tw-text-sm tw-text-grey-600;
+}
+
+/* --- Direction between them ---------------------------------------------- */
+
+.ifs-deploy .dp-env-flow {
+	@apply tw-flex tw-flex-col tw-items-center tw-justify-center tw-gap-1.5;
+}
+
+.ifs-deploy .dp-env-arrow {
+	@apply tw-inline-flex tw-items-center tw-gap-1.5;
+	@apply tw-rounded-full tw-bg-grey-900 tw-px-3 tw-py-1 tw-text-xs tw-font-semibold tw-uppercase tw-text-white;
+	letter-spacing: 0.06em;
+}
+
+/* Nowhere to push yet. Muted rather than removed: the relationship still exists, it is
+   just not configured, and a missing arrow would read as "this plugin does not do that". */
+.ifs-deploy .dp-env-arrow.is-idle {
+	@apply tw-bg-grey-50 tw-text-grey-600;
+}
+
+.ifs-deploy .dp-env-flow-note {
+	@apply tw-text-xs tw-text-grey-600;
+}
+
+/* Stacked on narrow screens, so the arrow has to point DOWN — the same glyph rotated,
+   since it is decorative and aria-hidden either way. */
+@media (max-width: 782px) {
+	.ifs-deploy .dp-env-arrow [aria-hidden="true"] {
+		transform: rotate(90deg);
+	}
+}
+
+/* --- Cards --------------------------------------------------------------- */
+
+.ifs-deploy .ifs-deploy-cards {
+	@apply tw-my-5 tw-flex tw-flex-wrap tw-gap-4;
+}
+
+/* Same card surface as `.dp-env-card` — see the note there for why the border and shadow
+   are literal values rather than palette tokens. Compare & Sync reuses this class, so it
+   picks the surface up too. */
+.ifs-deploy .ifs-deploy-card {
+	@apply tw-flex tw-flex-col tw-gap-2;
+	@apply tw-rounded-lg tw-bg-white tw-p-5;
+	border: 1px solid #EAEAEA;
+	box-shadow: rgba(149, 157, 165, .2) 0 0 8px;
+	min-width: 200px;
+	max-width: 400px;
+}
+
+.ifs-deploy .ifs-deploy-card-label {
+	@apply tw-text-xs tw-font-medium tw-uppercase tw-text-grey-600;
+	letter-spacing: 0.06em;
+}
+
+.ifs-deploy .ifs-deploy-card-value {
+	@apply tw-break-words tw-text-2xl tw-font-semibold tw-text-grey-900;
+	letter-spacing: -0.01em;
+}
+
+/* What the number MEANS. "12 requests" is not information until you know over what window,
+   and a card that needs a trip to another screen to interpret is not a status card. Negative
+   margin because the card's own gap-2 is sized for label/value, not for a third line. */
+.ifs-deploy .ifs-deploy-card-hint {
+	@apply tw--mt-1 tw-text-sm tw-text-grey-600;
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.ifs-deploy .button,
+.ifs-deploy .button-secondary {
+	@apply tw-inline-flex tw-items-center tw-justify-center tw-gap-2;
+	@apply tw-h-8 tw-px-3 tw-text-base tw-font-medium tw-leading-none;
+	@apply tw-rounded-md tw-border tw-border-grey-500 tw-bg-white tw-text-grey-800;
+	box-shadow: none;
+	transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.ifs-deploy .button:hover,
+.ifs-deploy .button-secondary:hover {
+	@apply tw-border-grey-600 tw-bg-grey-50 tw-text-grey-900;
+}
+
+/*
+ * FOCUS: no shadow, no ring — on any state.
+ *
+ * `box-shadow: none` is stated explicitly rather than by deleting our rule, because
+ * WordPress core ships `.wp-core-ui .button:focus { box-shadow: 0 0 0 1px #4f94d4, … }`.
+ * Removing ours would simply let core's BLUE ring through, which is worse in a greyscale
+ * UI than the grey one we started with. Same for `outline`, which some browsers draw by
+ * default on `:focus-visible`.
+ *
+ * Keyboard focus is instead shown by the button's OWN border going near-black. That is
+ * not a ring or a shadow — the element's existing 1px border just changes colour — so it
+ * is invisible to mouse users while still telling a keyboard user where Tab has landed.
+ * A control with no focus indicator at all fails WCAG 2.4.7 and makes the screen
+ * unnavigable without a mouse, and the border does the job at no visual cost.
+ */
+.ifs-deploy .button:focus,
+.ifs-deploy .button:focus-visible,
+.ifs-deploy .button-secondary:focus,
+.ifs-deploy .button-secondary:focus-visible {
+	box-shadow: none;
+	outline: none;
+}
+
+.ifs-deploy .button:focus-visible {
+	@apply tw-border-grey-900;
+}
+
+.ifs-deploy .button-primary {
+	@apply tw-border-grey-900 tw-bg-grey-900 tw-text-white;
+}
+
+.ifs-deploy .button-primary:hover {
+	@apply tw-border-grey-800 tw-bg-grey-800 tw-text-white;
+}
+
+/* Primary is already near-black, so its border cannot darken further — the fill lifts to
+   grey-800 instead, matching its own hover state. */
+.ifs-deploy .button-primary:focus,
+.ifs-deploy .button-primary:focus-visible {
+	@apply tw-text-white;
+	box-shadow: none;
+	outline: none;
+}
+
+.ifs-deploy .button-primary:focus-visible {
+	@apply tw-bg-grey-800;
+}
+
+.ifs-deploy .button-small {
+	@apply tw-h-7 tw-px-2.5 tw-text-sm;
+}
+
+.ifs-deploy .button:disabled,
+.ifs-deploy .button[disabled] {
+	@apply tw-cursor-not-allowed tw-border-grey-200 tw-bg-grey-50 tw-text-grey-400;
+}
+
+/* A row of actions, spaced by gap rather than by stray text nodes. */
+.ifs-deploy .dp-actions {
+	@apply tw-my-4 tw-flex tw-flex-wrap tw-items-center tw-gap-2;
+}
+
+
+/* ===========================================================================
+   Tabs — one screen, one panel
+   ===========================================================================
+   Underline tabs: no boxes, no fills. The active tab is marked by a bar drawn on the
+   nav's own bottom rule and by weight + colour on the label. Nothing else changes, so
+   the row stays quiet until you look for the current tab.
+
+   The bar is an `::after` inset by the tab's horizontal padding, so it matches the
+   LABEL width rather than the whole hit area. A `border-bottom` on the tab would run
+   the full padded width and read as a much heavier underline than the reference.
+
+   The nav does not wrap. Six labels fit comfortably on a desktop admin screen; below
+   that it scrolls sideways, because a wrapped row would leave the bottom rule cutting
+   through the middle of the tab bar.
+   =========================================================================== */
+
+.ifs-deploy .dp-panel {
+	@apply tw-rounded-lg tw-border tw-border-grey-200 tw-bg-white tw-shadow-xs;
+}
+
+.ifs-deploy .dp-tabs {
+	@apply tw-flex tw-flex-nowrap tw-gap-1 tw-overflow-x-auto tw-border-b tw-border-grey-200 tw-px-2;
+	/* Firefox / Safari: the horizontal bar is noise on a six-item row. */
+	scrollbar-width: none;
+}
+
+.ifs-deploy .dp-tabs::-webkit-scrollbar {
+	display: none;
+}
+
+.ifs-deploy .dp-tab {
+	@apply tw-relative tw-whitespace-nowrap tw-border-0 tw-bg-transparent tw-px-4 tw-py-3.5;
+	@apply tw-text-md tw-font-medium tw-text-grey-600 tw-no-underline;
+	transition: color .12s ease;
+}
+
+/* The active marker. Present but transparent on every tab, so switching only changes
+   a colour — no reflow, and the hover hint lands in exactly the same place. */
+.ifs-deploy .dp-tab::after {
+	@apply tw-absolute tw-bg-transparent;
+	content: '';
+	left: theme(spacing.4);
+	right: theme(spacing.4);
+	bottom: -1px;
+	height: 2px;
+	border-radius: 2px 2px 0 0;
+	transition: background-color .12s ease;
+}
+
+.ifs-deploy .dp-tab:hover {
+	@apply tw-text-grey-900;
+}
+
+.ifs-deploy .dp-tab:hover::after {
+	@apply tw-bg-grey-200;
+}
+
+/*
+ * No shadow, no outline. The tab already owns an underline bar, so keyboard focus reuses
+ * it at grey-500 — distinct from hover's grey-200 and from the active tab's grey-900.
+ * That means focus is visible without adding any new shape to the row.
+ */
+.ifs-deploy .dp-tab:focus,
+.ifs-deploy .dp-tab:focus-visible {
+	box-shadow: none;
+	outline: none;
+}
+
+.ifs-deploy .dp-tab:focus-visible::after {
+	@apply tw-bg-grey-500;
+}
+
+/* The active tab keeps its own bar colour when focused — it is already the current tab,
+   and dropping to grey-500 would read as having lost the selection. */
+.ifs-deploy .dp-tab.is-active:focus-visible::after {
+	@apply tw-bg-grey-900;
+}
+
+/*
+ * Colour and the bar only — NOT font-weight. A heavier active label is wider, so every
+ * tab to its right shifts on each switch, and the row visibly jitters.
+ */
+.ifs-deploy .dp-tab.is-active {
+	@apply tw-text-grey-900;
+}
+
+.ifs-deploy .dp-tab.is-active::after {
+	@apply tw-bg-grey-900;
+}
+
+.ifs-deploy .dp-tab-panel {
+	@apply tw-p-6;
+	/* Keeps the card from snapping shorter while a panel is in flight. */
+	min-height: 180px;
+}
+
+/* Fetching. Dimmed rather than blanked, so the panel does not jump to empty. */
+.ifs-deploy .dp-tab-panel.is-loading {
+	@apply tw-pointer-events-none tw-opacity-50;
+	transition: opacity .12s ease;
+}
+
+.ifs-deploy .dp-tab-error {
+	@apply tw-rounded-md tw-border tw-border-danger-border tw-bg-danger-bg tw-p-4 tw-text-danger-text;
+}
+
+/* --- Section headings inside a panel -------------------------------------- */
+
+.ifs-deploy .dp-section-intro {
+	@apply tw-mb-5;
+}
+
+.ifs-deploy h2.dp-section-title {
+	@apply tw-m-0 tw-p-0 tw-text-lg tw-font-semibold tw-text-grey-900;
+	letter-spacing: -0.01em;
+}
+
+.ifs-deploy .dp-section-description {
+	@apply tw-m-0 tw-mt-1 tw-max-w-3xl tw-text-md tw-text-grey-600;
+}
+
+/* Label plus a rule that runs to the edge — the "Direction" style separator. */
+.ifs-deploy .dp-block-heading {
+	@apply tw-mb-4 tw-mt-7 tw-flex tw-items-center tw-gap-4;
+}
+
+.ifs-deploy .dp-block-heading h3 {
+	@apply tw-m-0 tw-flex-none tw-p-0 tw-text-md tw-font-semibold tw-uppercase tw-text-grey-600;
+	letter-spacing: 0.06em;
+}
+
+.ifs-deploy .dp-block-heading::after {
+	@apply tw-h-px tw-flex-1 tw-bg-grey-200;
+	content: '';
+}
+
+.ifs-deploy .dp-block-heading-aside {
+	@apply tw-flex-none tw-order-last;
+}
+
+/*
+ * Panel content starts flush with the section intro; core's `.wrap h2` top margin
+ * would otherwise push the first table down by an inconsistent amount.
+ */
+.ifs-deploy .dp-tab-panel>h2:first-child,
+.ifs-deploy .dp-tab-panel>.dp-section-intro:first-child {
+	@apply tw-mt-0;
+}
+
+/* --- Settings' inner sections -------------------------------------------- */
+
+/*
+ * Pill group rather than a second row of underlined tabs: two levels of the same
+ * tab affordance is ambiguous about which one the content belongs to.
+ */
+.ifs-deploy .dp-subnav {
+	@apply tw-mb-6 tw-inline-flex tw-gap-1 tw-rounded-md tw-border tw-border-grey-200 tw-bg-grey-50 tw-p-1;
+}
+
+.ifs-deploy .dp-subnav-item {
+	@apply tw-rounded tw-px-3 tw-py-1.5 tw-text-md tw-font-medium tw-text-grey-600 tw-no-underline;
+	transition: background-color .12s ease, color .12s ease;
+}
+
+.ifs-deploy .dp-subnav-item:hover {
+	@apply tw-text-grey-900;
+}
+
+/* Same treatment: the pill's own surface lifts instead of gaining a ring. */
+.ifs-deploy .dp-subnav-item:focus,
+.ifs-deploy .dp-subnav-item:focus-visible {
+	box-shadow: none;
+	outline: none;
+}
+
+.ifs-deploy .dp-subnav-item:focus-visible {
+	@apply tw-bg-white tw-text-grey-900;
+}
+
+.ifs-deploy .dp-subnav-item.is-active {
+	@apply tw-bg-white tw-text-grey-900 tw-shadow-xs;
+}
+
+
+/* ---- Tailwind utilities: LAST, so they win over components (see header) ---- */
+@tailwind utilities;

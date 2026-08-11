@@ -34,6 +34,7 @@ final class Ajax {
 		add_action( 'wp_ajax_ifs_deploy_preview', array( $this, 'preview' ) );
 		add_action( 'wp_ajax_ifs_deploy_diagnostics', array( $this, 'diagnostics' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_log', array( $this, 'clear_log' ) );
+		add_action( 'wp_ajax_ifs_deploy_verbose_log', array( $this, 'verbose_log' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_api_log', array( $this, 'clear_api_log' ) );
 		add_action( 'wp_ajax_ifs_deploy_mark_ip', array( $this, 'mark_ip' ) );
 		add_action( 'wp_ajax_ifs_deploy_search_users', array( $this, 'search_users' ) );
@@ -128,6 +129,30 @@ final class Ajax {
 		DebugLog::clear();
 
 		wp_send_json_success( array( 'message' => __( 'Event log cleared.', 'ifs-deploy' ) ) );
+	}
+
+	/**
+	 * Turn the per-event diagnostic entries on or off.
+	 *
+	 * Off by default, because they are high-volume: a site running WPML writes one for
+	 * every language copy of every media item on every save, and the log holds 200
+	 * entries in total — so left on, routine noise EVICTS the deployment failure someone
+	 * is looking for.
+	 */
+	public function verbose_log(): void {
+		$this->guard();
+
+		$on = isset( $_POST['on'] ) && '1' === (string) wp_unslash( $_POST['on'] );
+
+		DebugLog::set_verbose( $on );
+
+		wp_send_json_success(
+			array(
+				'message' => $on
+					? __( 'Detailed logging is on. Reproduce the problem, then read the log — and switch it off afterwards.', 'ifs-deploy' )
+					: __( 'Detailed logging is off. Errors and warnings are still recorded.', 'ifs-deploy' ),
+			)
+		);
 	}
 
 	/**

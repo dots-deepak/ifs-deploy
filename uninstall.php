@@ -30,6 +30,7 @@ $options = array(
 	'ifs_deploy_credentials',
 	'ifs_deploy_remote',
 	'ifs_deploy_debug_log',
+	'ifs_deploy_verbose_log',
 	'ifs_deploy_roles',
 	'ifs_deploy_users',
 	'ifs_deploy_log_retention_days',

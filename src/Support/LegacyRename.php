@@ -77,6 +77,15 @@ final class LegacyRename {
 		'credentials',
 		'remote',
 		'debug_log',
+
+		/*
+		 * Added after the rename, so no pre-rename site can hold one — the lookup simply
+		 * finds nothing. It is listed anyway because the list has to stay in step with
+		 * `uninstall.php`, which is what `legacy-rename-test.php` pins: a key in one and
+		 * not the other is how data gets left behind on a site for ever.
+		 */
+		'verbose_log',
+
 		'roles',
 		'users',
 		'log_retention_days',

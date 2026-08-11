@@ -738,6 +738,19 @@
 			} );
 		} );
 
+		// Detailed logging. No $btn is passed to request(): it swaps a button's TEXT to
+		// "Working…", which would wipe a checkbox's label. The checkbox is disabled for
+		// the round trip instead, so it cannot be double-toggled.
+		$( document ).on( 'change', '#ifs-deploy-verbose-log', function () {
+			var $box = $( this );
+
+			$box.prop( 'disabled', true );
+
+			request( 'ifs_deploy_verbose_log', { on: $box.is( ':checked' ) ? '1' : '0' } ).always( function () {
+				$box.prop( 'disabled', false );
+			} );
+		} );
+
 		// Settings → Role Management — searchable user pickers.
 		//
 		// Uses jQuery UI autocomplete, which wp-admin already registers, rather than

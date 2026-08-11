@@ -1283,32 +1283,37 @@ foreach ( array( 'dp-env-card', 'ifs-deploy-card' ) as $class ) {
 }
 
 /*
- * NOT ASSERTED HERE — and the reason is a real, open defect, not an oversight.
+ * These two were suspended for a while, and the reason is worth keeping.
  *
- * `admin.src.css` authors two things the shipped `admin.css` does not contain:
+ * The shipped `admin.css` had fallen behind `admin.src.css`: the source declared the card
+ * shadow and the whole `.dp-env-card.is-self` rule, and NEITHER was in the built file —
+ * `is-self` occurred zero times, so the "this site" marker had no styling at all. That is
+ * the silent Tailwind no-op DESIGN.md warns about, and mtime did not catch it because both
+ * files carried their checkout time.
  *
- *   - `box-shadow: rgba(149, 157, 165, .2) 0 0 8px;` on `.ifs-deploy-card`, and
- *   - the whole `.ifs-deploy .dp-env-card.is-self` rule — `is-self` appears ZERO times
- *     in the built file, so the "this site" marker has no styling at all.
- *
- * That is the silent Tailwind no-op DESIGN.md warns about: the source was edited and
- * `tools/tailwindcss.exe` was never re-run, so the browser gets the OLD stylesheet while
- * the source looks correct. mtime does not catch it here (both files carry their checkout
- * time), which is why it survived.
- *
- * Asserting the built output would just pin the bug in place, and asserting the source
- * alone would claim a guarantee the browser does not get. Re-run the Tailwind build, then
- * restore both assertions:
- *
- *     ok( 'ifs-deploy-card carries the ambient shadow',
- *         dp_css_has( dp_css_rule( $built_env, '.ifs-deploy .ifs-deploy-card' ), 'box-shadow:0 0 8px' ) );
- *     ok( 'the "this site" border still overrides it',
- *         dp_css_has( dp_css_rule( $built_env, '.ifs-deploy .dp-env-card.is-self' ), 'border-color:' ) );
- *
- * The second one matters most: the base rule sets `border` as a shorthand, so the marker
- * only survives because `.is-self` is more specific. When it breaks, the failure is silent
- * — the pair simply stops telling you which site you are on.
+ * Re-running the build fixed it, and these assertions are the thing that now stops it
+ * happening again unnoticed.
  */
+// An offset-less glow on all four sides, which is what distinguishes this from the
+// shadow-xs drop it replaced. The minifier re-expresses the colour as hsla(), so only the
+// geometry is asserted.
+ok(
+	'ifs-deploy-card carries the ambient shadow',
+	dp_css_has( dp_css_rule( $built_env, '.ifs-deploy .ifs-deploy-card' ), 'box-shadow:0 0 8px' )
+);
+
+/*
+ * The one edge that MEANS something must still win.
+ *
+ * The base rule sets `border` as a shorthand, so the "this site" marker only survives
+ * because `.is-self` is more specific. That is easy to break by accident — moving the
+ * rule, or folding it into the base — and the failure is silent: the pair simply stops
+ * telling you which site you are on.
+ */
+ok(
+	'the "this site" border still overrides it',
+	dp_css_has( dp_css_rule( $built_env, '.ifs-deploy .dp-env-card.is-self' ), 'border-color:' )
+);
 
 echo "=== the toggle's ON state is built into the CSS that ships ===\n";
 

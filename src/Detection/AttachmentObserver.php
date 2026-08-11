@@ -45,15 +45,30 @@ final class AttachmentObserver {
 		 * converge on the same single row. The lowest id is also the original record —
 		 * the duplicates are the artefacts.
 		 */
-		$canonical = $this->canonical_for_file( $attachment_id );
+		$translated = $this->translation_original( $attachment_id );
+		$sharing    = $this->attachments_sharing_file( $attachment_id );
+
+		// A translation relationship is stated by the translation plugin itself, so it
+		// beats inferring one from a shared file.
+		$canonical = $translated > 0 ? $translated : $this->canonical_of( $sharing, $attachment_id );
 
 		if ( $canonical !== $attachment_id ) {
-			DebugLog::info(
-				'Several attachment records share one file; tracking the original only',
+			// debug(), not info(): on a multilingual site this fires once per language for
+			// every media save. It is the entry that identified WPML in the first place,
+			// so it stays available — behind "Detailed logging".
+			DebugLog::debug(
+				$translated > 0
+					? 'A translated copy of a media item; tracking the original only'
+					: 'Several attachment records share one file; tracking the original only',
 				array(
 					'attachment' => $attachment_id,
+					'status'     => (string) get_post_status( $attachment_id ),
 					'tracking'   => $canonical,
+					'reason'     => $translated > 0 ? 'translation' : 'same file',
 					'file'       => (string) get_post_meta( $attachment_id, '_wp_attached_file', true ),
+					// The scale, and the ids themselves — so the duplicates can be found
+					// in the Media Library if they ever need to be.
+					'sharing'    => count( $sharing ) . ' records: ' . implode( ', ', $sharing ),
 					'hook'       => (string) current_filter(),
 					'triggered'  => $this->caller(),
 				)
@@ -92,7 +107,7 @@ final class AttachmentObserver {
 		 * hook fired, and the call stack names what triggered it.
 		 */
 		if ( $queued ) {
-			DebugLog::info(
+			DebugLog::debug(
 				'Media change tracked',
 				array(
 					'attachment' => $attachment_id,
@@ -137,7 +152,7 @@ final class AttachmentObserver {
 		$track = (bool) apply_filters( 'ifs_deploy_track_attachment', $track, $attachment_id );
 
 		if ( ! $track ) {
-			DebugLog::info(
+			DebugLog::debug(
 				'Media change ignored',
 				array(
 					'attachment' => $attachment_id,
@@ -151,22 +166,90 @@ final class AttachmentObserver {
 	}
 
 	/**
-	 * The lowest attachment id sharing this attachment's file — itself, normally.
+	 * The attachment this one is a TRANSLATED COPY of, or 0.
 	 *
-	 * Returns the given id unchanged when the file is unknown or unique, so the ordinary
-	 * case costs one indexed meta query and changes nothing.
+	 * ── WHY THIS EXISTS ────────────────────────────────────────────────────────────
+	 *
+	 * A site reported one image edit producing eight pending changes. The log named the
+	 * cause outright:
+	 *
+	 *     plugins/sitepress-multilingual-cms/classes/media/duplication/
+	 *         class-wpml-media-attachments-duplication.php:287 wp_update_post()
+	 *
+	 * WPML's media duplication gives every language its own attachment record for the
+	 * SAME file — eight languages, eight records, one image. They are not eight pieces of
+	 * content: the file is identical, and on a multilingual Production site WPML creates
+	 * its own copies from the original anyway. Deploying all eight transfers one file
+	 * eight times and lets the last one win.
+	 *
+	 * `wpml_original_element_id` is WPML's own documented filter, so the relationship is
+	 * read from the plugin that owns it rather than guessed. That matters over the
+	 * shared-file heuristic below in two ways: it identifies the ORIGINAL rather than
+	 * assuming the lowest id is it, and it still works in the WPML configurations that
+	 * duplicate the FILE as well as the record, where no shared file exists to spot.
+	 *
+	 * Returns 0 when WPML is absent (the filter is unregistered, so the null default
+	 * comes straight back), when this attachment IS the original, or for any other
+	 * translation plugin registering the same filter — which is a feature, not an
+	 * accident: nothing here is WPML-specific beyond the filter name.
 	 */
-	private function canonical_for_file( int $attachment_id ): int {
+	private function translation_original( int $attachment_id ): int {
+		/**
+		 * The original element a translation belongs to.
+		 *
+		 * Provided by WPML; any plugin implementing the same contract works too.
+		 *
+		 * @param mixed  $original     Null by default.
+		 * @param int    $element_id
+		 * @param string $element_type
+		 */
+		$original = apply_filters( 'wpml_original_element_id', null, $attachment_id, 'post_attachment' );
+
+		if ( ! is_numeric( $original ) ) {
+			return 0;
+		}
+
+		$original = (int) $original;
+
+		// Guard both ends: the original reports itself, and a broken answer must never
+		// redirect tracking to something that does not exist.
+		if ( $original <= 0 || $original === $attachment_id || null === get_post( $original ) ) {
+			return 0;
+		}
+
+		return $original;
+	}
+
+	/**
+	 * Every attachment id pointing at this attachment's file, lowest first.
+	 *
+	 * Empty when the file is unknown, so a record with nothing to group on is left
+	 * strictly alone — "duplicate" cannot be established without a file, and this must
+	 * never guess. The ordinary case costs one indexed meta query and returns a single id.
+	 *
+	 * @return int[]
+	 */
+	private function attachments_sharing_file( int $attachment_id ): array {
 		$file = (string) get_post_meta( $attachment_id, '_wp_attached_file', true );
 
 		if ( '' === $file ) {
-			return $attachment_id;
+			return array();
 		}
 
 		$query = new \WP_Query(
 			array(
-				'post_type'              => 'attachment',
-				'post_status'            => 'inherit',
+				'post_type' => 'attachment',
+
+				/*
+				 * ANY status, not just `inherit`.
+				 *
+				 * `inherit` is the normal status for an attachment, and restricting to it
+				 * made this miss the very records it exists to find: a live site reported
+				 * "sharing: 1" for a file that eight records pointed at, because the seven
+				 * duplicates were in some other status. Whatever created them did not
+				 * create them the way WordPress does.
+				 */
+				'post_status'            => 'any',
 				'posts_per_page'         => 50,
 				'fields'                 => 'ids',
 				'orderby'                => 'ID',
@@ -185,7 +268,39 @@ final class AttachmentObserver {
 
 		$ids = array_map( 'intval', (array) $query->posts );
 
-		return empty( $ids ) ? $attachment_id : min( $ids );
+		// Always counts itself. Without this the log understated the problem, and a record
+		// the query cannot see would silently be treated as having no siblings.
+		$ids[] = $attachment_id;
+
+		$ids = array_values( array_unique( $ids ) );
+		sort( $ids );
+
+		return $ids;
+	}
+
+	/**
+	 * Which of the records sharing a file is the one to track.
+	 *
+	 * The lowest LIVE (`inherit`) record, because that is the original a deploy should
+	 * carry — falling back to the lowest id of any status when none is live, so the
+	 * choice stays deterministic either way. Deterministic matters more than it sounds:
+	 * every duplicate must agree on the same answer, or saving them in a different order
+	 * would produce a different row.
+	 *
+	 * @param int[] $ids Sorted ascending.
+	 */
+	private function canonical_of( array $ids, int $fallback ): int {
+		if ( empty( $ids ) ) {
+			return $fallback;
+		}
+
+		foreach ( $ids as $id ) {
+			if ( 'inherit' === get_post_status( $id ) ) {
+				return $id;
+			}
+		}
+
+		return min( $ids );
 	}
 
 	/**
@@ -228,32 +343,80 @@ final class AttachmentObserver {
 	}
 
 	/**
-	 * The first frame outside this plugin, so the log names what caused the save.
+	 * WHICH PLUGIN OR THEME caused this save.
 	 *
-	 * Limited to a shallow stack and reduced to "Class::method" — enough to identify a
-	 * theme or plugin, and nothing that could carry argument values into the log.
+	 * The first attempt reported the first frame that was not this plugin's, and that
+	 * answered "wp_insert_post" every time — WordPress's own function, which is what
+	 * fires `edit_attachment` in the first place. True, and useless.
+	 *
+	 * So the rule is by FILE, not by function: walk out through everything living in
+	 * `wp-includes` and `wp-admin` and report the first frame under `wp-content`, which
+	 * is by definition a plugin, mu-plugin or theme. `plugins/imagify/inc/media.php:120`
+	 * names the culprit outright, where a function name cannot.
+	 *
+	 * IfsDeploy's own frames are deliberately NOT skipped. Excluding them would mean
+	 * this can never implicate the one plugin whose behaviour is being investigated —
+	 * exactly the blind spot worth avoiding.
+	 *
+	 * Depth is generous (30) because the interesting frame sits above several layers of
+	 * core hook dispatch. `DEBUG_BACKTRACE_IGNORE_ARGS` is not optional: argument values
+	 * here would include post content and could include credentials.
 	 */
 	private function caller(): string {
 		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace
-		$frames = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS, 12 );
+		$frames = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS, 30 );
+
+		/*
+		 * ONLY LOOK ABOVE THE HOOK DISPATCH.
+		 *
+		 * A frame's `file`/`line` describe where the function IN THAT FRAME was called
+		 * FROM, not where it lives. So frame 0 is `caller()` reported at its own call
+		 * site inside this very file — which is under wp-content, and which an earlier
+		 * version of this method therefore returned as "the culprit". It named itself,
+		 * every time.
+		 *
+		 * Everything below `do_action()` is the hook machinery delivering the event to
+		 * us; nothing there caused anything. The frames ABOVE it are the real chain:
+		 * do_action was called by wp_insert_post, which was called by whatever actually
+		 * saved the attachment. The first of those living under wp-content is the answer.
+		 */
+		$past_hook = false;
+		$fallback  = '';
 
 		foreach ( $frames as $frame ) {
-			$class = (string) ( $frame['class'] ?? '' );
-
-			if ( '' !== $class && 0 === strpos( $class, 'IfsDeploy\\' ) ) {
-				continue;
-			}
-
 			$function = (string) ( $frame['function'] ?? '' );
 
-			if ( in_array( $function, array( 'do_action', 'apply_filters', 'call_user_func_array', 'caller', 'on_change' ), true ) ) {
+			if ( ! $past_hook ) {
+				if ( in_array( $function, array( 'do_action', 'do_action_ref_array' ), true ) ) {
+					$past_hook = true;
+				}
 				continue;
 			}
 
-			return ( '' !== $class ? $class . '::' : '' ) . $function;
+			$file = (string) ( $frame['file'] ?? '' );
+
+			if ( '' === $file ) {
+				continue;
+			}
+
+			$path = str_replace( '\\', '/', $file );
+			$line = (int) ( $frame['line'] ?? 0 );
+			$at   = strpos( $path, '/wp-content/' );
+
+			if ( false !== $at ) {
+				// Everything after wp-content/, so the answer is short and names the
+				// plugin or theme directory outright. IfsDeploy is NOT excluded: above
+				// the hook it would be a genuine cause, and excluding it would create
+				// exactly the blind spot worth avoiding.
+				return sprintf( '%s:%d %s()', substr( $path, $at + strlen( '/wp-content/' ) ), $line, $function );
+			}
+
+			// Core all the way out — a cron tick or a REST route, say. Report the
+			// outermost core frame rather than nothing at all.
+			$fallback = sprintf( 'wp-core %s()', $function );
 		}
 
-		return '';
+		return '' !== $fallback ? $fallback : 'unknown (no hook dispatch in stack)';
 	}
 
 	public function on_delete( int $attachment_id ): void {

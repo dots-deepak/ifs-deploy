@@ -1,10 +1,10 @@
-=== IFS Deploy ===
+﻿=== IFS Deploy ===
 Contributors: SET_YOUR_WORDPRESS_ORG_USERNAME
 Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.4.0
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -110,31 +110,44 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 
 == Changelog ==
 
+= 0.5.0 =
+Recognises WPML media translations directly, and adds a logging switch.
+
+* **WPML media translations are recognised as such.** 0.4.0 merged them because they
+  share a file; this asks WPML itself which record is the original. That is more precise
+  in two ways: it identifies the real original rather than assuming the oldest record is
+  it, and it still works in the WPML setups that copy the file as well. Any translation
+  plugin offering the same hook is covered too.
+* **New "Detailed logging" switch** under Logs & Diagnostics, off by default. When on,
+  every detected change is recorded with the file, the status, the related records and
+  the plugin or theme responsible — identified by file and line. It is off by default
+  because those entries are written per event and the log keeps a fixed number of them:
+  left on, routine detail pushes out the errors worth reading. Errors and warnings are
+  always recorded either way.
+* **Fixed missing admin styling.** The shipped stylesheet had fallen behind its source,
+  so the "this site" marker on the Overview screen had no border and the summary cards
+  had no shadow.
+
 = 0.4.0 =
-Several media records for one file are now tracked as one pending change.
+Duplicated media records now count as one pending change.
 
 * **A file with more than one media record is tracked once.** WordPress can end up
-  holding several media records that all point at the same file, and each was appearing
-  as its own pending change. That was misleading as well as untidy: deploying all of them
-  produces a single file on Production regardless, because they share one source address.
-  The original record is tracked and the rest are merged into it, both as changes happen
-  and for entries already in the list.
-* Note this treats the symptom. If one file has several media records, something on the
-  site is creating them — the log names the file, the hook and the caller for each media
-  change, which is where to look.
+  holding several media records that point at the same file — WPML's media duplication is
+  one cause — and each was appearing as its own pending change. That was misleading as
+  well as untidy: deploying all of them produces a single file on Production regardless.
+  The original is kept and the rest are merged into it, both as changes happen and for
+  entries already in the list.
+* **Generated image sizes are no longer tracked as separate media items.** The original
+  file is what deploys; Production regenerates its own sizes. Some plugins register those
+  derivatives as real attachments, and each was appearing as its own pending change.
+* Attachments can be excluded from tracking with the `ifs_deploy_track_attachment`
+  filter.
 
 = 0.3.0 =
 Fixes duplicate entries in Pending Changes, and adds a change preview for media.
 
-* **Generated image sizes are no longer tracked as separate media items.** The original
-  file is what deploys; Production regenerates its own sizes. Some plugins register those
-  derivatives as real attachments, and each one was appearing as its own pending change.
 * **Media entries now show their file name**, so several attachments that share a title —
   which happens whenever the same file is uploaded more than once — can be told apart.
-* **Every media change is written to the log** with the file it belongs to and the hook
-  that fired, so unexpected entries can be traced to whatever created them.
-* Attachments can be excluded from tracking with the `ifs_deploy_track_attachment`
-  filter.
 
 * **The same item can no longer appear more than once in Pending Changes.** On some
   sites the queue table was missing the database key that prevents it, so two saves of
@@ -189,9 +202,10 @@ automatically on each (schema versions 6 and 7).
 
 == Upgrade Notice ==
 
-= 0.4.0 =
-Several media records for one file now count as one pending change. Includes everything
-in 0.2.0 and 0.3.0, so update both sites together; the database upgrade runs itself.
+= 0.5.0 =
+Recognises WPML media translations directly, adds a logging switch, and restores missing
+admin styling. Includes everything since 0.2.0, so update both sites together; the
+database upgrade runs itself.
 
 = 0.3.0 =
 Fixes duplicate Pending Changes entries and adds a change preview for media. Includes

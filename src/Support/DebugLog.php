@@ -23,9 +23,13 @@ final class DebugLog {
 	/** Entries retained, newest first. */
 	private const MAX_ENTRIES = 200;
 
+	/** Whether the high-volume `debug()` entries are kept. */
+	private const VERBOSE_OPTION = 'ifs_deploy_verbose_log';
+
 	public const LEVEL_ERROR   = 'error';
 	public const LEVEL_WARNING = 'warning';
 	public const LEVEL_INFO    = 'info';
+	public const LEVEL_DEBUG   = 'debug';
 
 	public static function error( string $message, array $context = array() ): void {
 		self::record( self::LEVEL_ERROR, $message, $context );
@@ -37,6 +41,38 @@ final class DebugLog {
 
 	public static function info( string $message, array $context = array() ): void {
 		self::record( self::LEVEL_INFO, $message, $context );
+	}
+
+	/**
+	 * A routine, per-event entry — kept ONLY when detailed logging is switched on.
+	 *
+	 * The distinction is volume, not importance. Some events are worth one line when
+	 * something goes wrong and are pure noise the rest of the time: a site running WPML
+	 * fires one of these for every language copy of every media item, on every save, so
+	 * eight of them can bury the deployment failure underneath. The log holds 200 entries
+	 * in total — noise does not just clutter it, it EVICTS the entries someone needs.
+	 *
+	 * These are exactly the entries that identified WPML as the cause of duplicate media
+	 * rows, so they stay available; they are simply off until asked for. Errors and
+	 * warnings are never gated.
+	 */
+	public static function debug( string $message, array $context = array() ): void {
+		if ( ! self::verbose() ) {
+			return;
+		}
+
+		self::record( self::LEVEL_DEBUG, $message, $context );
+	}
+
+	/**
+	 * Is detailed logging switched on? (Logs & Diagnostics → Detailed logging.)
+	 */
+	public static function verbose(): bool {
+		return (bool) get_option( self::VERBOSE_OPTION, false );
+	}
+
+	public static function set_verbose( bool $on ): void {
+		update_option( self::VERBOSE_OPTION, $on, false );
 	}
 
 	/**

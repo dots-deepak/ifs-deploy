@@ -524,6 +524,25 @@ final class LogsPage {
 		echo ' <span class="description">' . esc_html__( 'Newest first. Records deployment attempts, transport errors, import failures and refused writes. Credentials are redacted.', 'ifs-deploy' ) . '</span>';
 		echo '</p>';
 
+		/*
+		 * Detailed logging, off by default.
+		 *
+		 * These entries are what identified WPML as the reason one image edit produced
+		 * eight pending changes, so they earn their place — but on a multilingual site
+		 * they are written once per language per media save, and the log holds 200
+		 * entries. Left on, routine noise EVICTS the failure someone is hunting for.
+		 *
+		 * Rendered as a plain checkbox that posts on change: it is a single boolean with
+		 * no form around it, so a Save button would be ceremony.
+		 */
+		printf(
+			'<p><label><input type="checkbox" id="ifs-deploy-verbose-log"%1$s /> %2$s</label>'
+				. ' <span class="description">%3$s</span></p>',
+			checked( DebugLog::verbose(), true, false ),
+			esc_html__( 'Detailed logging', 'ifs-deploy' ),
+			esc_html__( 'Records every change detected, with the file and the plugin responsible. Useful for tracing unexpected entries — switch it off again afterwards, or it fills the log.', 'ifs-deploy' )
+		);
+
 		// State the filter and how to defeat it. A log that quietly omits entries is worse
 		// than a long one, so the count of what is hidden is named rather than implied.
 		if ( ! $show_all ) {
@@ -601,6 +620,9 @@ final class LogsPage {
 			DebugLog::LEVEL_ERROR   => array( __( 'Error', 'ifs-deploy' ), 'failed' ),
 			DebugLog::LEVEL_WARNING => array( __( 'Warning', 'ifs-deploy' ), 'partial' ),
 			DebugLog::LEVEL_INFO    => array( __( 'Info', 'ifs-deploy' ), '' ),
+			// Only present while "Detailed logging" is on, so it is worth labelling as
+			// something the reader switched on rather than as ordinary Info.
+			DebugLog::LEVEL_DEBUG   => array( __( 'Detail', 'ifs-deploy' ), '' ),
 		);
 
 		$label = $map[ $level ] ?? array( $level, '' );

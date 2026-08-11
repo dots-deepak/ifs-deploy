@@ -33,6 +33,11 @@ final class ChangeTracker {
 
 	public function register(): void {
 		// Posts (all tracked post types incl. reusable blocks).
+		//
+		// `pre_post_update` first, and it is not optional bookkeeping: it is the only
+		// moment the PREVIOUS state of a post is still readable, which is what lets an
+		// edit that is undone leave the queue again. See PostObserver::on_pre_update().
+		add_action( 'pre_post_update', array( $this->posts, 'on_pre_update' ), 10, 1 );
 		add_action( 'save_post', array( $this->posts, 'on_save' ), 99 );
 		add_action( 'acf/save_post', array( $this->posts, 'on_save' ), 20 );
 		add_action( 'wp_trash_post', array( $this->posts, 'on_delete' ), 10, 1 );

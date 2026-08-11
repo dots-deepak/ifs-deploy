@@ -8,6 +8,7 @@ use IfsDeploy\Auth\Signer;
 use IfsDeploy\Rest\RestController;
 use IfsDeploy\Support\Config;
 use IfsDeploy\Support\DebugLog;
+use IfsDeploy\Support\Json;
 use WP_Error;
 
 /**
@@ -57,7 +58,31 @@ final class DeployClient {
 			return new WP_Error( 'ifs_deploy_not_configured', __( 'Production connection is not configured.', 'ifs-deploy' ) );
 		}
 
-		$body      = (string) wp_json_encode( $payload );
+		$body = Json::encode( $payload );
+
+		/*
+		 * An unencodable payload must not be sent as an EMPTY BODY.
+		 *
+		 * This was `(string) wp_json_encode( $payload )`, so a failure produced `''` —
+		 * and an empty body is a perfectly well-formed request. It is correctly signed,
+		 * Production accepts it, `get_json_params()` yields nothing, and the import
+		 * reports success over zero objects. The push "worked" and nothing was deployed.
+		 *
+		 * Reported as a WP_Error so it travels the same path as any other transport
+		 * failure: the queue rows stay pending and the deploy is honestly a failure.
+		 */
+		if ( null === $body ) {
+			DebugLog::error(
+				'Could not encode the request payload; nothing was sent',
+				array( 'route' => $route )
+			);
+
+			return new WP_Error(
+				'ifs_deploy_encode_failed',
+				__( 'This deployment could not be encoded as JSON, so nothing was sent. It usually means one object holds invalid text or is nested far deeper than expected — see IFS Deploy → Logs, and try pushing the items separately to find it.', 'ifs-deploy' )
+			);
+		}
+
 		$timestamp = (string) time();
 		$nonce     = wp_generate_uuid4();
 

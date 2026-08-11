@@ -53,7 +53,19 @@ final class ContentSignature {
 			return null;
 		}
 
-		return md5( (string) wp_json_encode( self::normalize( $post ) ) );
+		$json = Json::encode( self::normalize( $post ) );
+
+		/*
+		 * No signature at all, rather than the signature of an empty string.
+		 *
+		 * Every caller already treats a missing signature as "unknown" and fails
+		 * closed — `SyncCheck::in_sync()` refuses to call an empty local signature a
+		 * match, and `QueueVerifier::should_clear()` keeps the row. `md5( '' )` would
+		 * instead be a perfectly ordinary-looking hash, identical for every post that
+		 * failed to encode, so two unrelated pages would compare as "in sync" and
+		 * Compare & Sync would report content as deployed that never was.
+		 */
+		return null === $json ? null : md5( $json );
 	}
 
 	/**

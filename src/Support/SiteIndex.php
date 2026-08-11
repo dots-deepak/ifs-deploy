@@ -13,13 +13,25 @@ use IfsDeploy\Import\PostImporter;
 final class SiteIndex {
 
 	/**
-	 * @return array<int,array{
+	 * The index, plus whether the site has more objects than it covers.
+	 *
+	 * Truncation used to be invisible. The query simply stopped at the limit and
+	 * returned a list that looked complete, so Compare & Sync drew its conclusions
+	 * from a partial picture and stated them with total confidence: every Staging
+	 * page past the cut reported "Not on Production" (its counterpart was merely
+	 * absent from the answer), and every Production page past the cut reported "Only
+	 * on Production". Both invite exactly the wrong action — pushing a duplicate of a
+	 * page that already exists.
+	 *
+	 * One extra row is fetched rather than counted, so knowing costs no second query.
+	 *
+	 * @return array{index:array<int,array{
 	 *   id:int, type:string, slug:string, title:string, status:string,
 	 *   modified:string, signature:string, deployed_sig:string,
 	 *   origin_id:int, origin_site:string
-	 * }>
+	 * }>, truncated:bool, limit:int}
 	 */
-	public static function build(): array {
+	public static function report(): array {
 		$post_types = Config::tracked_post_types();
 
 		/**
@@ -29,11 +41,15 @@ final class SiteIndex {
 		 */
 		$limit = (int) apply_filters( 'ifs_deploy_index_limit', 2000 );
 
+		// 0 or -1 means "no limit", which get_posts() understands and which can never
+		// be truncated; anything else fetches one extra row as the overflow probe.
+		$unlimited = $limit <= 0;
+
 		$posts = get_posts(
 			array(
 				'post_type'        => $post_types,
 				'post_status'      => array( 'publish', 'draft', 'pending', 'private', 'future' ),
-				'posts_per_page'   => $limit,
+				'posts_per_page'   => $unlimited ? -1 : $limit + 1,
 				'orderby'          => 'ID',
 				'order'            => 'ASC',
 				'suppress_filters' => false,
@@ -59,6 +75,13 @@ final class SiteIndex {
 			)
 		);
 
+		$truncated = ! $unlimited && count( $posts ) > $limit;
+
+		if ( $truncated ) {
+			// Drop the probe row so the index itself still honours the documented limit.
+			$posts = array_slice( $posts, 0, $limit );
+		}
+
 		self::refresh_caches( $posts );
 
 		$index = array();
@@ -77,7 +100,11 @@ final class SiteIndex {
 			);
 		}
 
-		return $index;
+		return array(
+			'index'     => $index,
+			'truncated' => $truncated,
+			'limit'     => $limit,
+		);
 	}
 
 	/**

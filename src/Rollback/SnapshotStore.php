@@ -4,8 +4,11 @@ declare(strict_types=1);
 namespace IfsDeploy\Rollback;
 
 use IfsDeploy\Export\MenuExporter;
+use IfsDeploy\Export\OptionExporter;
 use IfsDeploy\Import\MenuImporter;
 use IfsDeploy\Support\Config;
+use IfsDeploy\Support\DebugLog;
+use IfsDeploy\Support\Json;
 use IfsDeploy\Support\Legacy;
 use IfsDeploy\Support\Schema;
 use IfsDeploy\Support\SafeData;
@@ -227,16 +230,48 @@ final class SnapshotStore {
 
 	/**
 	 * Insert a revision row and prune to the retention limit.
+	 *
+	 * Returns 0 when the snapshot could not be encoded, which is the honest answer:
+	 * no restore point was created.
 	 */
 	private function insert_revision( int $deployment_id, string $object_type, int $object_id, array $snapshot ): int {
 		global $wpdb;
+
+		$json = Json::encode( $snapshot );
+
+		/*
+		 * NEVER WRITE AN UNENCODABLE SNAPSHOT AS AN EMPTY STRING.
+		 *
+		 * This was `(string) wp_json_encode( $snapshot )`, so a failure stored `''`.
+		 * `restore()` json_decodes that to null and returns false — so the revision row
+		 * existed, a revision id came back, the History screen therefore offered its
+		 * Rollback button, and pressing it restored nothing while reporting "Rolled
+		 * back 0 of 1 objects". The one moment rollback matters is the moment it is
+		 * least likely to be investigated.
+		 *
+		 * Refusing the row means ImportManager records revision_id 0, History correctly
+		 * shows that no rollback is available, and the reason is in the log.
+		 */
+		if ( null === $json ) {
+			DebugLog::error(
+				'Could not encode a rollback snapshot — no restore point was created for this object',
+				array(
+					'deployment_id' => $deployment_id,
+					'object_type'   => $object_type,
+					'object_id'     => $object_id,
+				)
+			);
+
+			return 0;
+		}
+
 		$wpdb->insert(
 			Schema::revisions_table(),
 			array(
 				'deployment_id' => $deployment_id,
 				'object_type'   => $object_type,
 				'object_id'     => $object_id,
-				'snapshot'      => (string) wp_json_encode( $snapshot ),
+				'snapshot'      => $json,
 				'created_at'    => current_time( 'mysql' ),
 			),
 			array( '%d', '%s', '%d', '%s', '%s' )
@@ -248,8 +283,17 @@ final class SnapshotStore {
 		return $revision_id;
 	}
 
+	/**
+	 * Delegated, not reimplemented.
+	 *
+	 * This was a second copy of the same crc32 expression. Two copies of a value that
+	 * decides WHERE a row is filed is the kind of drift nothing catches: change one and
+	 * snapshots get written under an id that `prune()` and every lookup no longer find,
+	 * so old revisions accumulate for ever and the restore points quietly stop lining up
+	 * with the options they belong to.
+	 */
 	private function option_id( string $name ): int {
-		return (int) sprintf( '%u', crc32( $name ) );
+		return OptionExporter::option_id( $name );
 	}
 
 	public function get( int $revision_id ): ?object {

@@ -19,9 +19,59 @@ final class PostObserver {
 	private QueueRepository $queue;
 	private PostExporter $exporter;
 
+	/**
+	 * Package hash of each post as it stood BEFORE this request modified it.
+	 *
+	 * @var array<int,string>
+	 */
+	private array $baselines = array();
+
 	public function __construct( ?QueueRepository $queue = null, ?PostExporter $exporter = null ) {
 		$this->queue    = $queue ?? new QueueRepository();
 		$this->exporter = $exporter ?? new PostExporter();
+	}
+
+	/**
+	 * Remember what a post looked like before it is edited (`pre_post_update`).
+	 *
+	 * Why this exists: the queue records the state an object was changed TO, and
+	 * nothing else. So "edit a page, decide against it, put it back" left the row
+	 * pending for ever — the row had no idea what the page had looked like before,
+	 * and for an object IFS Deploy has never deployed there is no `deployed_hash`
+	 * to fall back on either.
+	 *
+	 * `pre_post_update` fires inside wp_insert_post BEFORE the row is written, and
+	 * before any meta box, ACF or block-editor meta write lands, so the package built
+	 * here is genuinely the pre-edit one.
+	 *
+	 * Two things keep the cost down, because this runs on every post save on the site:
+	 * an untracked post type is rejected before anything is read, and a post that
+	 * already HAS a queue row is skipped — such a row carries its own baseline
+	 * (QueueRepository::upsert()) and needs no export at all. So the extra work is one
+	 * export on the first edit of an object, and none after that.
+	 *
+	 * `pre_post_update` never fires for a brand-new post, which is correct: something
+	 * that did not exist has no state to be put back to.
+	 *
+	 * @param int|string $post_id
+	 */
+	public function on_pre_update( $post_id ): void {
+		$post_id = (int) $post_id;
+
+		if ( isset( $this->baselines[ $post_id ] ) || ! $this->is_trackable( $post_id ) ) {
+			return;
+		}
+
+		if ( null !== $this->queue->find( 'post', $post_id ) ) {
+			return;
+		}
+
+		$package = $this->exporter->export( $post_id );
+		if ( null === $package ) {
+			return;
+		}
+
+		$this->baselines[ $post_id ] = Hasher::hash( $package );
 	}
 
 	/**
@@ -42,6 +92,24 @@ final class PostObserver {
 		}
 
 		$post = get_post( $post_id );
+		$hash = Hasher::hash( $package );
+
+		$baseline = (string) ( $this->baselines[ $post_id ] ?? '' );
+		unset( $this->baselines[ $post_id ] );
+
+		/*
+		 * A baseline equal to the hash we are about to store would resolve the row the
+		 * instant it was created — it means the "before" was captured after the change
+		 * had already landed, or that nothing changed at all. Dropping it costs only the
+		 * old behaviour; keeping it would silently discard a real pending change.
+		 *
+		 * `on_save` also runs a second time for the same request on ACF posts
+		 * (save_post, then acf/save_post), and the baseline is consumed by the first —
+		 * which is right, since by then the row exists and carries its own.
+		 */
+		if ( $baseline === $hash ) {
+			$baseline = '';
+		}
 
 		$this->queue->upsert(
 			'post',
@@ -49,7 +117,8 @@ final class PostObserver {
 			$post_id,
 			(string) $post->post_title,
 			'update',
-			Hasher::hash( $package )
+			$hash,
+			$baseline
 		);
 	}
 

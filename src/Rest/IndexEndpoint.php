@@ -36,14 +36,23 @@ final class IndexEndpoint {
 			);
 		}
 
-		$creds = Credentials::get();
+		$creds  = Credentials::get();
+		$report = SiteIndex::report();
 
 		return new WP_REST_Response(
 			array(
 				'ok'      => true,
 				'site_id' => $creds['site_id'],
 				'name'    => get_bloginfo( 'name' ),
-				'index'   => SiteIndex::build(),
+				'index'   => $report['index'],
+
+				// Whether this answer is the whole site. Staging cannot tell the difference
+				// between "no such page here" and "the list stopped before reaching it", so
+				// saying so is the only way Compare can avoid reporting the second as the
+				// first. Absent from an older Production, which reads as not truncated —
+				// the previous behaviour exactly.
+				'truncated' => $report['truncated'],
+				'limit'     => $report['limit'],
 			),
 			200
 		);

@@ -6,6 +6,7 @@ namespace IfsDeploy\Import;
 use IfsDeploy\Support\ContentFirewall;
 use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\MediaIdentity;
+use IfsDeploy\Support\MetaBlocklist;
 use IfsDeploy\Support\SafeData;
 use IfsDeploy\Support\UrlRewriter;
 use WP_Error;
@@ -82,6 +83,23 @@ final class PostImporter {
 			'ping_status'    => (string) ( $fields['ping_status'] ?? 'closed' ),
 			'post_password'  => (string) ( $fields['post_password'] ?? '' ),
 			'post_date'      => (string) ( $fields['post_date'] ?? '' ),
+
+			/*
+			 * post_date_gmt travels too, instead of being recomputed here.
+			 *
+			 * The exporter has always sent it and the importer always dropped it. Core
+			 * then derived it from post_date using THIS site's timezone
+			 * (`get_gmt_from_date()`), so whenever the two sites are configured for
+			 * different timezones every deployed date silently shifted by the offset —
+			 * and because post_date itself was copied verbatim, the drift only showed in
+			 * feeds, REST output, scheduling and anything else that reads the GMT column.
+			 *
+			 * An empty value keeps the old behaviour, which is what an older Staging
+			 * sends, so a mixed-version pair is unaffected. Core honours an explicit
+			 * post_date_gmt and falls back to deriving one otherwise.
+			 */
+			'post_date_gmt'  => (string) ( $fields['post_date_gmt'] ?? '' ),
+
 			'post_parent'    => $this->map_parent( (int) ( $fields['post_parent'] ?? 0 ), $origin_site, (string) ( $fields['post_type'] ?? 'post' ) ),
 		);
 
@@ -119,7 +137,7 @@ final class PostImporter {
 		// meta verbatim preserves shortcodes and avoids ACF re-formatting.
 		$this->apply_meta( $post_id, (array) ( $package['meta'] ?? array() ), $origin_url, $media_map );
 		$this->apply_taxonomies( $post_id, (array) ( $package['taxonomies'] ?? array() ) );
-		$this->apply_featured_image( $post_id, $package['featured_image'] ?? null );
+		$this->apply_featured_image( $post_id, $package['featured_image'] ?? null, $origin_site );
 
 		$this->report_firewall( $post_id, (string) ( $fields['post_title'] ?? '' ) );
 
@@ -321,6 +339,23 @@ final class PostImporter {
 					break;
 				case 'id':
 					$match = $this->match_by_id( $origin_id, $type );
+
+					// ID parity has to be CORROBORATED before it is allowed to select the
+					// object a deploy will overwrite. See id_parity_is_same_post().
+					if ( $match && ! $this->id_parity_is_same_post( $match, $fields, $origin_id, $origin_site ) ) {
+						DebugLog::warning(
+							'Refused to match a Production post by ID alone — nothing about it corroborates that it is the same object',
+							array(
+								'origin_id'   => $origin_id,
+								'post_type'   => $type,
+								'origin_site' => $origin_site,
+								'staging'     => (string) ( $fields['post_title'] ?? '' ),
+								'production'  => (string) ( get_post( $match )->post_title ?? '' ),
+							)
+						);
+
+						$match = 0;
+					}
 					break;
 				case 'slug':
 					$match = $this->match_by_slug( $slug, $type );
@@ -370,6 +405,9 @@ final class PostImporter {
 
 	/**
 	 * Match a post by exact ID when the type also matches (cloned sites).
+	 *
+	 * Raw parity, and NOT sufficient on its own to choose an overwrite target — see
+	 * id_parity_is_same_post(), which locate() applies on top of this.
 	 */
 	private function match_by_id( int $id, string $type ): int {
 		if ( $id <= 0 ) {
@@ -377,6 +415,69 @@ final class PostImporter {
 		}
 		$post = get_post( $id );
 		return ( $post instanceof \WP_Post && $post->post_type === $type ) ? $id : 0;
+	}
+
+	/**
+	 * Is the post sitting at this id plausibly the same object we are importing?
+	 *
+	 * ID parity used to be accepted on its own: same id, same post_type, done. On sites
+	 * cloned from one another — the case it exists for — that is right. On sites that
+	 * were NOT cloned, ids are unrelated, so Staging post 412 would silently overwrite
+	 * whatever Production happened to keep at 412. No error, no duplicate, no warning:
+	 * an unrelated live page simply became a copy of a different one, and the pre-deploy
+	 * snapshot made it look like an ordinary deploy.
+	 *
+	 * This is the post-side counterpart of MediaImporter::id_parity_is_same_file(), and
+	 * it refuses on the same two kinds of evidence:
+	 *
+	 *   1. The target is STAMPED as somebody else's — a different origin site, or a
+	 *      different origin id on this one. That is proof, so it always refuses.
+	 *   2. NOTHING about the target agrees with the package: not the slug, not the
+	 *      title, not the publish date.
+	 *
+	 * Any ONE of those three matching is enough, deliberately. Requiring the slug alone
+	 * would break the ordinary case of renaming a slug on Staging — parity would refuse,
+	 * the slug strategy would miss, and the deploy would insert a DUPLICATE of the page
+	 * it was meant to update. Editors rename a slug or a title, rarely both at once, and
+	 * almost never the publish date as well; an unrelated post would have to collide on
+	 * the id, the type AND one of those three to be mistaken for this one.
+	 *
+	 * @param int   $id     The Production post at the parity id.
+	 * @param array $fields The package's `object` fields.
+	 */
+	private function id_parity_is_same_post( int $id, array $fields, int $origin_id, string $origin_site ): bool {
+		$post = get_post( $id );
+		if ( ! $post instanceof \WP_Post ) {
+			return false;
+		}
+
+		// Stamped from another site, or from a different object on this one → not ours.
+		$stamped_site = (string) get_post_meta( $id, self::ORIGIN_SITE_META, true );
+		if ( '' !== $stamped_site && '' !== $origin_site && $stamped_site !== $origin_site ) {
+			return false;
+		}
+
+		$stamped_id = (int) get_post_meta( $id, self::ORIGIN_ID_META, true );
+		if ( $stamped_id > 0 && $stamped_id !== $origin_id ) {
+			return false;
+		}
+
+		$slug = (string) ( $fields['post_name'] ?? '' );
+		if ( '' !== $slug && strtolower( $slug ) === strtolower( (string) $post->post_name ) ) {
+			return true;
+		}
+
+		$title = (string) ( $fields['post_title'] ?? '' );
+		if ( '' !== $title && $title === (string) $post->post_title ) {
+			return true;
+		}
+
+		$date = (string) ( $fields['post_date'] ?? '' );
+		if ( '' !== $date && '0000-00-00 00:00:00' !== $date && $date === (string) $post->post_date ) {
+			return true;
+		}
+
+		return false;
 	}
 
 	/**
@@ -431,6 +532,8 @@ final class PostImporter {
 	private function apply_meta( int $post_id, array $meta, string $origin_url = '', array $media_map = array() ): void {
 		$target_url = home_url();
 
+		$this->remove_meta_deleted_on_source( $post_id, $meta );
+
 		foreach ( $meta as $key => $values ) {
 			$key = (string) $key;
 			if ( self::ORIGIN_ID_META === $key || self::ORIGIN_SITE_META === $key ) {
@@ -448,6 +551,79 @@ final class PostImporter {
 				add_post_meta( $post_id, $key, wp_slash( $value ) );
 			}
 		}
+	}
+
+	/**
+	 * Delete deployable meta that Production still holds and the package no longer has.
+	 *
+	 * THE BUG THIS FIXES: clearing a value on Staging did not clear it on Production.
+	 * Yoast is the everyday case — emptying an SEO meta description makes Yoast delete
+	 * `_yoast_wpseo_metadesc` outright, so the key simply vanishes from the package, and
+	 * an importer that only ever writes the keys it is given left the old description
+	 * live for ever. Setting a value synced; removing one did not, which is worse than
+	 * not syncing at all, because the two sites disagree while claiming to be in sync.
+	 *
+	 * The package is the COMPLETE deployable meta set for the object: PostExporter
+	 * exports all of `get_post_meta()` minus `Support\MetaBlocklist`. So a key that is
+	 * on Production and not in the package is either deleted on Staging, or it is meta
+	 * this plugin should not have been touching in the first place.
+	 *
+	 * That is exactly what the blocklist decides, and it is why deletion is safe to
+	 * drive from it: editor locks, `_thumbnail_id`, oEmbed and transient caches, trash
+	 * bookkeeping and IFS Deploy's own stamps are all ignored here, so none of them can
+	 * be removed. Anything else a Production-only plugin owns can be protected the same
+	 * way, with the documented `ifs_deploy_ignore_meta_key` filter — one list decides
+	 * both what is deployed and what is left alone, which is the point of having one.
+	 *
+	 * Whole-hog deletion can still be switched off per site:
+	 *
+	 *     add_filter( 'ifs_deploy_delete_missing_meta', '__return_false' );
+	 *
+	 * @param array<string,mixed> $package_meta Meta the package carries.
+	 */
+	private function remove_meta_deleted_on_source( int $post_id, array $package_meta ): void {
+		/**
+		 * Filter whether meta absent from a package is deleted on the target.
+		 *
+		 * @param bool  $delete       Default true.
+		 * @param int   $post_id      Target post.
+		 * @param array $package_meta The meta the package carries.
+		 */
+		if ( ! apply_filters( 'ifs_deploy_delete_missing_meta', true, $post_id, $package_meta ) ) {
+			return;
+		}
+
+		$current = get_post_meta( $post_id );
+		if ( ! is_array( $current ) ) {
+			return;
+		}
+
+		$removed = array();
+
+		foreach ( $current as $key => $unused ) {
+			$key = (string) $key;
+
+			if ( array_key_exists( $key, $package_meta ) || MetaBlocklist::is_ignored( $key ) ) {
+				continue;
+			}
+
+			delete_post_meta( $post_id, $key );
+			$removed[] = $key;
+		}
+
+		if ( empty( $removed ) ) {
+			return;
+		}
+
+		// Logged because a deletion is the one meta operation with nothing left behind
+		// to show what happened.
+		DebugLog::info(
+			'Removed post meta that no longer exists on the sending site',
+			array(
+				'post_id' => $post_id,
+				'keys'    => implode( ', ', $removed ),
+			)
+		);
 	}
 
 	/**
@@ -499,12 +675,12 @@ final class PostImporter {
 	}
 
 	/**
-	 * Sideload the featured image, deduping by source URL so repeated deploys do
-	 * not create duplicate attachments.
+	 * Attach the featured image, deduping by source URL so repeated deploys do not
+	 * create duplicate attachments.
 	 *
-	 * @param array{url:string,filename:string,alt:string}|null $image
+	 * @param array{url:string,filename:string,alt:string,id?:int}|null $image
 	 */
-	private function apply_featured_image( int $post_id, $image ): void {
+	private function apply_featured_image( int $post_id, $image, string $origin_site = '' ): void {
 		if ( ! is_array( $image ) || empty( $image['url'] ) ) {
 			return;
 		}
@@ -514,6 +690,58 @@ final class PostImporter {
 
 		if ( $existing ) {
 			set_post_thumbnail( $post_id, $existing );
+			return;
+		}
+
+		/*
+		 * Prefer the MEDIA PIPELINE whenever the package names the source attachment.
+		 *
+		 * `media_sideload_image()` below cannot pass `import_id`, so an image that
+		 * arrived this way got a fresh Production id. ID parity is what makes raw meta
+		 * work: ACF image/gallery fields store the attachment ID verbatim, and this
+		 * importer copies meta verbatim — so a featured image that landed on a different
+		 * id left every ACF field pointing at it broken, or worse, pointing at whatever
+		 * unrelated attachment held that id on Production. It only worked when the same
+		 * image also happened to travel as its own queued media object.
+		 *
+		 * MediaImporter is the one place that knows how to do this properly, and going
+		 * through it also picks up the size cap, the concurrent-download claim, the
+		 * year/month folder and the origin stamps. `$image['id']` is absent from packages
+		 * built by an older Staging, which is exactly when the sideload below is still
+		 * the right answer.
+		 */
+		$origin_attachment_id = (int) ( $image['id'] ?? 0 );
+
+		if ( $origin_attachment_id > 0 ) {
+			$imported = ( new MediaImporter() )->import(
+				array(
+					'type'        => 'media',
+					'action'      => 'update',
+					'origin_id'   => $origin_attachment_id,
+					'origin_site' => $origin_site,
+					'source_url'  => $source_url,
+					'filename'    => (string) ( $image['filename'] ?? '' ),
+					'alt'         => (string) ( $image['alt'] ?? '' ),
+				)
+			);
+
+			if ( ! is_wp_error( $imported ) && ! empty( $imported['object_id'] ) ) {
+				set_post_thumbnail( $post_id, (int) $imported['object_id'] );
+				return;
+			}
+
+			// Not retried by sideloading: MediaImporter already logged the reason, and the
+			// failures it reports (an oversized file, an unreachable Staging) would fail
+			// the same way again — at the cost of a second download attempt.
+			DebugLog::error(
+				'Featured image could not be imported',
+				array(
+					'post_id'    => $post_id,
+					'source_url' => $source_url,
+					'error'      => is_wp_error( $imported ) ? $imported->get_error_message() : 'no attachment id returned',
+				)
+			);
+
 			return;
 		}
 

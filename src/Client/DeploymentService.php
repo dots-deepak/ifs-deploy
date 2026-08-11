@@ -57,7 +57,7 @@ final class DeploymentService {
 	 */
 	public function deploy( array $queue_ids, int $user_id ): array {
 		$objects = array();
-		$mapped  = array(); // object id => queue id.
+		$mapped  = array(); // "type|object id" => queue id.
 
 		foreach ( $queue_ids as $queue_id ) {
 			$item = $this->queue->get( (int) $queue_id );
@@ -85,8 +85,9 @@ final class DeploymentService {
 				continue;
 			}
 
-			$objects[]                        = $package;
-			$mapped[ (int) $item->object_id ] = (int) $item->id;
+			$objects[] = $package;
+
+			$mapped[ self::map_key( (string) $item->object_type, (int) $item->object_id ) ] = (int) $item->id;
 		}
 
 		return $this->dispatch( $objects, $mapped, $user_id );
@@ -113,8 +114,9 @@ final class DeploymentService {
 			$objects[] = $package;
 
 			// If this post is also in the pending queue, mark it deployed too.
-			$queue_item              = $this->queue->find_by_object_id( $post_id );
-			$mapped[ $post_id ]      = $queue_item ? (int) $queue_item->id : 0;
+			$queue_item = $this->queue->find_by_object_id( $post_id );
+
+			$mapped[ self::map_key( 'post', $post_id ) ] = $queue_item ? (int) $queue_item->id : 0;
 		}
 
 		return $this->dispatch( $objects, $mapped, $user_id );
@@ -321,6 +323,17 @@ final class DeploymentService {
 		);
 	}
 
+	/**
+	 * The key an object's queue row is filed under while a deployment is in flight.
+	 *
+	 * Public and static so the pairing can be tested without a database: the id space
+	 * is shared between object types, so this is the only thing standing between one
+	 * object's result and another object's queue row.
+	 */
+	public static function map_key( string $type, int $object_id ): string {
+		return ( '' !== $type ? $type : 'post' ) . '|' . $object_id;
+	}
+
 	private function build_package( object $item ): ?array {
 		$type = (string) $item->object_type;
 
@@ -403,7 +416,7 @@ final class DeploymentService {
 	 * Apply the import response to history + queue statuses.
 	 *
 	 * @param array{status:int,body:array} $response
-	 * @param array<int,int>               $mapped object_id => queue_id
+	 * @param array<string,int>            $mapped "type|object_id" => queue_id
 	 */
 	private function finalize( int $deployment_id, string $uuid, array $response, array $mapped ): array {
 		$body    = $response['body'];
@@ -411,8 +424,21 @@ final class DeploymentService {
 		$status  = (string) ( $body['status'] ?? DeploymentRepository::STATUS_FAILED );
 
 		foreach ( $results as $result ) {
+			/*
+			 * Keyed by TYPE AND ID, because an id alone is not unique across types.
+			 *
+			 * Post ids, term ids, attachment ids and crc-derived option ids all live in
+			 * the same integer space, so a batch containing post 42 and term 42 used to
+			 * cross-assign their outcomes: the term's failure marked the POST's queue row
+			 * failed, and the post's success marked the term deployed — stamping a
+			 * deployed_hash for content Production never accepted, which then dropped the
+			 * row out of Pending Changes for good.
+			 *
+			 * `?? 'post'` matches ImportManager's own default for a result with no type,
+			 * so a Production old enough not to send one behaves exactly as before.
+			 */
 			$origin_id = (int) ( $result['origin_id'] ?? 0 );
-			$queue_id  = $mapped[ $origin_id ] ?? 0;
+			$queue_id  = $mapped[ self::map_key( (string) ( $result['type'] ?? 'post' ), $origin_id ) ] ?? 0;
 			if ( ! $queue_id ) {
 				continue;
 			}

@@ -140,7 +140,7 @@ final class PostExporter {
 	}
 
 	/**
-	 * @return array{url:string,filename:string,alt:string}|null
+	 * @return array{id:int,url:string,filename:string,alt:string}|null
 	 */
 	private function featured_image( int $post_id ): ?array {
 		$thumb_id = (int) get_post_thumbnail_id( $post_id );
@@ -154,6 +154,21 @@ final class PostExporter {
 		}
 
 		return array(
+			/*
+			 * The source attachment id, so the copy on Production can be created with the
+			 * SAME id (PostImporter routes this through MediaImporter's import_id path).
+			 * Without it a featured image got a fresh id on arrival and every raw ACF
+			 * image field pointing at it broke.
+			 *
+			 * NOTE: adding a key changes the package hash, so each post that has a
+			 * featured image will queue once more on its next save even if nothing
+			 * changed. It settles by itself — the CONTENT SIGNATURE is unaffected (see
+			 * ContentSignature::featured(), which reports filename and alt only), so
+			 * QueueVerifier finds the object already in sync and clears the row. It is
+			 * also invisible in the diff, since PackageDiff compares images by filename
+			 * and alt text rather than by id.
+			 */
+			'id'       => $thumb_id,
 			'url'      => $url,
 			// The ORIGINAL filename, not the local one: Production may have stored the
 			// same image as hero-1.png, and comparing local names would report a

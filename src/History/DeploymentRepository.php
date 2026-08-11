@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace IfsDeploy\History;
 
+use IfsDeploy\Support\Json;
 use IfsDeploy\Support\Schema;
 
 /**
@@ -39,11 +40,20 @@ final class DeploymentRepository {
 	public function update( int $id, string $status, array $log ): void {
 		global $wpdb;
 
+		/*
+		 * `?? '[]'` so the column always holds VALID JSON.
+		 *
+		 * A failed encode used to store false, which `$wpdb` writes as an empty string;
+		 * the History screen then json_decodes it to null and renders a deployment with
+		 * no objects in it at all — including, crucially, no per-object errors, which is
+		 * the one thing someone reads that screen to find. An empty array at least says
+		 * "no detail recorded" consistently, and the status column is still right.
+		 */
 		$wpdb->update(
 			Schema::deployments_table(),
 			array(
 				'deployment_status' => $status,
-				'deployment_log'    => wp_json_encode( $log ),
+				'deployment_log'    => Json::encode( $log ) ?? '[]',
 			),
 			array( 'id' => $id ),
 			array( '%s', '%s' ),

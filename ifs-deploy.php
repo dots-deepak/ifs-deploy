@@ -69,7 +69,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 define( 'IFS_DEPLOY_VERSION', '0.1.0' );
-define( 'IFS_DEPLOY_DB_VERSION', '5' );
+define( 'IFS_DEPLOY_DB_VERSION', '7' );
 define( 'IFS_DEPLOY_FILE', __FILE__ );
 define( 'IFS_DEPLOY_DIR', plugin_dir_path( __FILE__ ) );
 define( 'IFS_DEPLOY_URL', plugin_dir_url( __FILE__ ) );

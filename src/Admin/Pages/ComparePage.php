@@ -55,6 +55,13 @@ final class ComparePage {
 			return;
 		}
 
+		// Before the numbers, not after them: a summary drawn from a partial index reads
+		// as authoritative, and the whole point of this notice is that it is not.
+		$truncated = (string) ( $comparison['truncated'] ?? '' );
+		if ( '' !== $truncated ) {
+			printf( '<div class="notice notice-warning"><p>%s</p></div>', esc_html( $truncated ) );
+		}
+
 		$rows      = (array) $comparison['rows'];
 		$different = $this->filter_status( $rows, CompareService::STATUS_DIFFERENT );
 		$missing   = $this->filter_status( $rows, CompareService::STATUS_MISSING );

@@ -64,8 +64,8 @@ which is why Diagnostics checks Production for each expected class by name (§20
   `composer.json` declares the same PSR-4 map for tooling, but **no
   `composer install` is required on the server** and there is no `vendor/`.
 - WordPress coding-style-ish (tabs, `esc_*`, nonces, capability checks).
-- **85 classes in `src/`**, all lint-clean.
-- **27 test suites + 6 repo-wide checks, 1454 assertions**, runnable without WordPress. See §24.
+- **86 classes in `src/`**, all lint-clean.
+- **31 test suites + 6 repo-wide checks, 1590 assertions**, runnable without WordPress. See §24.
 
 ### Naming — one plugin, six spellings
 
@@ -234,9 +234,12 @@ A redirect now surfaces as `ifs_deploy_redirected` with the fix (correct the Pro
   index *is* the check) plus `expires_at` for the sweep. §5.
 
 `Schema::maybe_upgrade()` runs on `plugins_loaded` gated by `ifs_deploy_db_version`
-(constant `IFS_DEPLOY_DB_VERSION`, **now `5`**). Schema history: **1** initial tables ·
+(constant `IFS_DEPLOY_DB_VERSION`, **now `6`**). Schema history: **1** initial tables ·
 **2** queue `user_id` · **3** queue `deployed_hash` plus a `Schema::migrate()` backfill ·
-**4** `api_log` · **5** `nonces`.
+**4** `api_log` · **5** `nonces` · **6** no schema change — re-keys existing option queue
+rows after `OptionExporter::option_id()` stopped using crc32 (§26) · **7** queue
+`baseline_hash`, plus collapsing duplicate rows now that a row's identity is
+(object_type, object_id) rather than including the subtype (§26b).
 
 **Options** (the authoritative list is `uninstall.php`, and `contracts-test.php` fails if any
 option the code writes is missing from it): `db_version, role, credentials, remote, debug_log,
@@ -510,7 +513,7 @@ can produce a false "in sync."
 
 ## 17. File map (src/)
 
-85 classes. Newer additions marked ★.
+86 classes. Newer additions marked ★.
 
 ```
 Plugin.php                     bootstrap; wires services by role
@@ -524,6 +527,7 @@ Support/  Activator, Schema, Config, Logger, ContentSignature, SiteIndex,
         ★ SyncCheck       the single "in sync?" rule (§23)
         ★ UrlRewriter     rewrite / neutralize environment URLs (§19)
         ★ SafeData        unserialize with allowed_classes => false (C-1, §5)
+        ★ Json            encode that reports failure instead of casting it away (§26)
         ★ ContentFirewall kses allow-list for imported content (H-2, §5)
         ★ ClientIp        which address to believe, and when (M-6a, §20)
         ★ ApiLog          who called the signed API (M-6a, §20)
@@ -1112,9 +1116,16 @@ describe the deployment relationship, not the content.
 
 ## 24. Test suites
 
-Live in **`tests/`**. **27 suites + 6 repo-wide checks, 1454 assertions, all passing.** Plain
+Live in **`tests/`**. **31 suites + 6 repo-wide checks, 1590 assertions, all passing.** Plain
 PHP — no WordPress, no PHPUnit, no `composer install`; each suite stubs the handful of WordPress
 functions it touches.
+
+Two non-suite helpers sit alongside them, both named so `run-all.php` cannot mistake them for
+suites: `lib-css.php` (read built CSS without depending on the build flag) and
+`lib-media-importer.php` (a namespaced stand-in for `Import\MediaImporter`, so `postmatch` can
+ask whether the featured image is routed through the media pipeline without performing a real
+download). `tests/stubs/wp-admin/includes/` holds three empty files that only exist to satisfy
+the unconditional `require_once ABSPATH . …` in the sideload fallback.
 
 ```bash
 php tests/run-all.php            # everything, exits non-zero on failure
@@ -1135,10 +1146,14 @@ php tests/access-test.php        # one suite
 | `retention` | 45 | log purging, and that nonces are *not* swept on the retention cutoff |
 | `termmatch` | 40 | taxonomy term matching |
 | `nonce` | 37 | the replay store's atomic claim and its fail-open path |
+| `idspace` | 42 | the four §26 identity fixes: queue-status keying, option ids, index truncation, rollback replay |
 | `access` | 33 | capability matrix, per-user allow/block, lockout safety (§21) |
 | `metablock` | 33 | ignored vs deployable meta, the filter (§23) |
+| `encoding` | 33 | what happens when `wp_json_encode()` fails, at all six call sites (§26) |
+| `postmatch` | 30 | ID-parity corroboration, `post_date_gmt`, featured-image parity (§26) |
 | `contracts` | 28 | **cross-file agreements** — see below |
-| `queue-revert` | 18 | edit → deploy → edit → undo lifecycle (§23) |
+| `metadelete` | 22 | meta removed on Staging is removed on Production, and what cannot be (§26b) |
+| `queue-revert` | 39 | edit → deploy → edit → undo (§23), undo without ever deploying, one row per object (§26b) |
 | `url` · `rollback-diff` | 17 each | URL variants (§19); snapshot → package semantics (§22) |
 | `verifier` | 16 | which queue rows may be cleared; fails closed (§23) |
 | `meta` | 14 | deep meta rewriting, serialization round-trip (§19) |
@@ -1279,34 +1294,200 @@ Fixed since the review: meta slashing, the Settings remote-wipe, import ordering
 `_oembed_`/`_transient_` inconsistency, missing per-object error reporting, the
 30s timeout.
 
-**Everything below was re-verified against the code and is still open.** None of it was
-touched by the two security rounds, deliberately: these are *feature-correctness* bugs, not
-vulnerabilities, and mixing the two would have made either audit impossible to review. They
-are now the highest-value work left in the plugin.
+**All eight remaining findings are now FIXED**, with regression coverage (§24:
+`postmatch`, `encoding`, `idspace`). None of this was touched by the two security rounds,
+deliberately: these are *feature-correctness* bugs, not vulnerabilities, and mixing the two
+would have made either audit impossible to review.
 
-**Still open:**
+Each suite was run against the pre-fix code first and shown to fail — `postmatch` alone
+went 16-red — because a test that cannot demonstrate the bug it guards is not evidence
+(§24).
 
-- **`match_by_id` can overwrite unrelated content.** `PostImporter::match_by_id()`
-  matches on ID + post_type alone, so on sites that were NOT cloned, Staging post 412
-  silently overwrites an unrelated Production post 412. The media path was hardened
-  (§12) but the post path was not. Consider gating the `id` strategy behind an
-  explicit "these sites are clones" setting, or requiring the slug to agree.
-- **Queue-status mapping collides across types** — `DeploymentService` keys
-  `$mapped` by object id alone, so a post and a term sharing an id cross-assign each
-  other's success/failure. Key it `type|id`.
-- **`post_date_gmt` is exported but dropped on import**, so dates drift when the two
-  sites have different timezones.
-- **`wp_json_encode()` failure is never checked.** On invalid UTF-8 it returns
-  `false`, which silently becomes an identical hash for every object, an empty
-  request body, or an **empty snapshot that makes rollback impossible**.
-- **`SiteIndex` truncates at 2000 posts with no signal**, so beyond that Compare
-  misreports real Production pages as "Not on Production".
-- **Production never marks a rolled-back deployment**, so a second rollback
-  re-restores the same snapshots.
-- **`crc32` option ids can collide**, merging two options into one queue row.
-- **Featured images sideloaded by `apply_featured_image()` get a fresh Production
-  id** (no `import_id`), so raw ACF image fields pointing at that attachment break
-  unless the image also went through the media pipeline.
+### 1. `match_by_id` could overwrite unrelated content — fixed
+
+`PostImporter::match_by_id()` matched on ID + post_type alone, so on sites that were NOT
+cloned, Staging post 412 silently overwrote whatever unrelated page Production kept at 412.
+No error, no duplicate, no warning, and the pre-deploy snapshot made it look ordinary.
+
+`locate()` now corroborates parity through **`id_parity_is_same_post()`** — the post-side
+counterpart of the media fix in §12 — which refuses on two kinds of evidence:
+
+1. the target is **stamped** as somebody else's (different origin site, or a different
+   origin id on this one); that is proof, so it always refuses;
+2. **nothing** about the target agrees: not the slug, not the title, not the publish date.
+
+Any *one* of those three matching is enough, and that is deliberate. Requiring the slug
+alone would break the ordinary case of renaming a slug on Staging — parity would refuse,
+the slug strategy would miss, and the deploy would insert a **duplicate of the very page it
+meant to update**. Every refusal is logged.
+
+Note what is *not* changed: `map_parent()` still uses raw parity, because the package
+carries no parent slug and the failure there (a wrong parent) is visible and reversible
+rather than silent data loss.
+
+### 2. Queue-status mapping collided across types — fixed
+
+`DeploymentService` keyed `$mapped` by object id alone, and post/term/attachment/option ids
+share one integer space. A batch holding post 42 and term 42 cross-assigned their outcomes:
+the term's failure marked the *post's* row failed, and the post's success marked the term
+deployed — stamping a `deployed_hash` for content Production never accepted, which drops the
+row out of Pending Changes for good. Now keyed via **`DeploymentService::map_key()`**
+(`type|id`, public + static so the pairing is testable without a database). `finalize()`
+reads `$result['type'] ?? 'post'`, matching `ImportManager`'s own default so a Production
+too old to send a type behaves exactly as before.
+
+### 3. `post_date_gmt` was exported but dropped on import — fixed
+
+The importer now passes it through. Core was re-deriving it from `post_date` with
+`get_gmt_from_date()` using the **receiving** site's timezone, so every deployed date
+shifted by the offset between the two sites — visible only in feeds, REST output and
+scheduling, since `post_date` itself was copied verbatim. An empty value (what an older
+Staging sends) keeps the old behaviour.
+
+### 4. `wp_json_encode()` failure was never checked — fixed
+
+New **`Support\Json::encode()`** returns `?string` instead of `false`, so each caller has to
+decide what its own failure looks like — and every one of those decisions now fails closed:
+
+| Call site | Was | Now |
+|---|---|---|
+| `Queue\Hasher` | `md5('')` — the same hash for every unencodable object, so a real edit read as "nothing changed" and two unrelated objects read as identical | falls back to `md5(serialize())`, which keeps varying |
+| `Rollback\SnapshotStore` | empty snapshot → History offered a Rollback button that restored nothing | no revision row, logged; History correctly shows no rollback available |
+| `Client\DeployClient` | empty body → a well-formed POST Production accepts, reporting success over zero objects | `WP_Error`, nothing sent |
+| `Support\ContentSignature` | `md5('')` → two unrelated pages compare as "in sync" | `null`, which every caller already treats as unknown |
+| `History\DeploymentRepository` | invalid JSON → History renders a deployment with no per-object errors | `?? '[]'` |
+| `Support\PackageDiff` | already handled | routed through `Json` too, so there is one seam |
+
+`wp_json_encode()` is more robust than it looks — core retries through
+`_wp_json_sanity_check()`, which strips invalid UTF-8 — so the reachable vectors are depth
+beyond 512 (nested ACF flexible content gets there), INF/NAN and recursion. `encoding-test`
+asserts its fixtures are live vectors before asserting anything about the handling.
+
+### 5. `SiteIndex` truncated at 2000 with no signal — fixed
+
+`build()` became **`report()`**, returning `{index, truncated, limit}`. Overflow is detected
+by fetching one extra row, so knowing costs no second query. `/index` passes `truncated`
+across the wire, `CompareService` checks **both** sides and `ComparePage` renders a warning
+*above* the summary cards. This mattered because silence produced a confident wrong verdict,
+not a blank screen: everything past the cut on Staging read as "Not on Production" and
+everything past the cut on Production as "Only on Production" — and acting on the first
+creates a duplicate of a page that already exists.
+
+### 6. Production never marked a rolled-back deployment — fixed
+
+`RollbackEndpoint` now refuses an already-rolled-back deployment with **409** (distinct from
+a rollback that restored zero objects) and records `STATUS_ROLLED_BACK` — but only when
+something was actually restored, since a run that restored nothing changed no state and
+marking it would strand the deployment. Replaying is not the no-op it looks like: roll back
+deploy B then deploy A and the object correctly sits at A's "before" state; replaying B
+afterwards silently drags it forward again. Staging already hid the button, but that guard
+disappears when history is cleared and was never binding on a receiver.
+
+### 7. `crc32` option ids could collide — fixed
+
+The queue's UNIQUE key is `(type, subtype, object_id)` and an option's subtype is always
+`''`, so a collision did not error — it **merged**: the second option overwrote the first
+row's title and hash, and the first silently stopped being tracked. `OptionExporter::option_id()`
+now takes the **top 60 bits of an md5**, moving the birthday bound from ~77,000 names to
+~1.5 billion while still fitting `bigint(20) unsigned`. `SnapshotStore` had a *second copy*
+of the crc32 expression and now delegates, because drift there would file revisions under an
+id `prune()` and every lookup no longer find.
+
+Changing the derivation moves where the data lives, so **DB version 6** re-keys existing
+option rows (`Schema::rekey_option_rows()`). Row by row in PHP, not one bulk `UPDATE`: the
+UNIQUE key means a row moving onto an id a not-yet-migrated row still occupies would abort
+the statement partway and leave the table half-converted.
+
+### 8. Featured images lost ID parity — fixed
+
+`media_sideload_image()` cannot pass `import_id`, so the image landed on a fresh Production
+id — and since meta is copied verbatim, every raw ACF image field pointing at it broke, or
+worse pointed at an unrelated attachment holding that id. It only worked when the image also
+happened to travel as its own queued media object.
+
+`PostExporter` now sends the source attachment `id`, and `apply_featured_image()` routes
+through **`MediaImporter`**, picking up the size cap, the concurrent-download claim, the
+year/month folder and the origin stamps as well. The sideload path remains as the fallback
+for packages from an older Staging.
+
+One consequence worth knowing: adding a key changes the package hash, so **each post with a
+featured image queues once more on its next save** even if nothing changed. It settles by
+itself — `ContentSignature` is unaffected (it reports filename and alt only), so
+`QueueVerifier` finds the object already in sync and clears the row, and `PackageDiff`
+compares images by filename and alt so the dialog shows nothing either.
+
+---
+
+## 26b. Three field-reported bugs (fixed)
+
+Reported from the live pair after §26 landed. All three were about the queue and the
+importer telling the truth about *removals* and *identity*.
+
+### 1. Deleting a Yoast meta description did not sync
+
+Setting a value deployed; clearing it did not. Yoast **deletes**
+`_yoast_wpseo_metadesc` when the field is emptied, so the key vanished from the package
+— and `PostImporter::apply_meta()` only ever wrote the keys it was given. The old
+description stayed live for ever, with both screens reporting the object as in sync.
+
+`PostImporter::remove_meta_deleted_on_source()` now deletes deployable meta the package
+no longer carries. **The package is the complete deployable meta set** (`PostExporter`
+exports all of `get_post_meta()` minus `Support\MetaBlocklist`), so a key on Production
+and not in the package is either deleted on Staging or is meta this plugin should never
+have touched — and the blocklist is exactly what decides that. Editor locks,
+`_thumbnail_id`, oEmbed/transient caches and `_ifs_deploy_*` are never exported, so they
+can never be "missing from a package" and are structurally out of reach.
+
+Two escape hatches: `ifs_deploy_ignore_meta_key` protects a Production-only plugin's meta
+(one list decides both what deploys and what is left alone), and
+`ifs_deploy_delete_missing_meta` turns the whole behaviour off.
+
+**This reverses a documented §19 decision**, so `PackageDiff` moved with it: meta absent
+from a package is now `removed`, not `kept`. Taxonomies and the featured image keep the
+`$full_replace` distinction, because the importer still only replaces those when the
+package mentions them. Covered by `metadelete-test.php` (22 cases).
+
+### 2. Reverting an edit left the row in Pending Changes
+
+§23 solved this with `deployed_hash`, but only for objects **already deployed by IFS
+Deploy**. The reported flow is the other one: edit something, decide against pushing it,
+put it back. Nothing was ever deployed, so there was no `deployed_hash` — and the row
+only ever remembered the state it was changed *to*.
+
+The queue now also carries **`baseline_hash`** (DB v7): the state an object held before
+its pending change began. Editing back to it resolves the row to the new status
+`unchanged` — deliberately not `deployed`, which would assert something false and would
+let `Schema`'s v3 backfill stamp a `deployed_hash` for content Production has never seen.
+
+It is populated two ways:
+
+- **Free, for every object type.** A row leaving a settled state supplies its own
+  baseline: whatever it held while settled *is* the state to return to.
+- **`PostObserver::on_pre_update()`**, hooked to `pre_post_update`, for a post with no
+  row at all. That hook is the last moment the previous state is still readable — it
+  fires before the row is written and before any meta box, ACF or block-editor meta
+  write. Cost is one export on the first edit of an object and none after, because a post
+  that already has a row is skipped. A baseline equal to the hash being stored is
+  discarded, so a "before" captured too late can never resolve a real change.
+
+Gap worth knowing: terms, options, media and menus have no pre-edit hook, so the *first*
+change to one of those still relies on the free path (which needs an existing settled
+row) or on `QueueVerifier`.
+
+### 3. One media update produced several tracked items
+
+The queue's identity was `(object_type, object_subtype, object_id)` — and the subtype is
+a **mime type** for media and a **post type** for posts. Both are content: they can
+change while the object stays the same one. Every distinct value therefore got its own
+row that the others never deduped against.
+
+`QueueRepository::find()` now identifies a row by `(object_type, object_id)` alone and
+carries the subtype as data. Object ids are unique per type in WordPress, so nothing is
+lost. DB v7 collapses existing duplicates (highest id wins — rows are updated in place,
+so a duplicate is always the newer insert). The UNIQUE key is unchanged; the new rule is
+strictly narrower, so it cannot be violated.
+
+Covered by `queue-revert-test.php`, extended to 39 cases across all three of the above.
 
 ---
 
@@ -1431,17 +1612,22 @@ the only way the last 13 old-name strings go away.
 
 ## 30. How to continue in a new chat
 
-Point the session at this file and the plugin dir. State of play: **1454 assertions green**,
-`SECURITY.md` has nothing outstanding, release zip builds.
+Point the session at this file and the plugin dir. State of play: **1545 assertions green**,
+`SECURITY.md` has nothing outstanding, **§26 is fully closed**.
 
 Suggested order:
 
 1. **End-to-end smoke test on the live pair.** The suites are unit-level — nothing exercises a
    real signed round-trip, media download, or the admin screens end to end. Do this before
-   anything else, especially the migration (§29).
-2. **Work §26.** `match_by_id` overwriting unrelated content is the most dangerous unresolved
-   item; the unchecked `wp_json_encode()` is the quietest (an empty snapshot makes rollback
-   impossible).
+   anything else, especially the migration (§29). It matters more than usual now: §26 touched
+   the import matcher, the media path and the schema, and none of that has run against real
+   WordPress yet.
+2. **Re-run the Tailwind build.** `assets/css/admin.css` is STALE relative to
+   `assets/css/src/admin.src.css` in this checkout — the source declares a card shadow and the
+   whole `.ifs-deploy .dp-env-card.is-self` rule, and neither is in the built file (`is-self`
+   appears zero times). That is the silent no-op DESIGN.md warns about, and mtime does not
+   catch it because both files carry their checkout time. Two assertions in `render-test.php`
+   are commented out waiting on it, with the exact lines to restore.
 3. **Rotate the two WP Engine passwords** — still live in git history (§1).
 4. **Set `Author`, `Plugin URI`, `Contributors`, `Tested up to`.** The build warns about the
    first three.

@@ -13,10 +13,12 @@ namespace IfsDeploy\Support;
  *     one meta blocklist. Anything that differs is a real difference, not an
  *     artefact of two different serializations.
  *  2. The change label describes what the IMPORT ACTUALLY DOES, not merely how
- *     the two sides differ. The importer replaces the meta keys it is given but
- *     never deletes keys absent from the package, so production-only meta is
- *     reported as "kept", not "removed" — the preview must not promise a deletion
- *     that will not happen.
+ *     the two sides differ. A taxonomy or featured image the package does not
+ *     mention is left alone by the importer, so it is reported as "kept" rather
+ *     than "removed" — the preview must not promise a deletion that will not
+ *     happen. Meta is the other way round: the importer now deletes deployable
+ *     keys the package no longer carries, so it must not promise a survival that
+ *     will not happen either.
  */
 final class PackageDiff {
 
@@ -171,12 +173,19 @@ final class PackageDiff {
 				continue;
 			}
 
-			// The importer replaces keys it is given and leaves the rest alone, so a
-			// target-only key survives a push — but a rollback rewrites meta wholesale,
-			// so there the same key really does go away.
-			$change = ( ! $in_package && $on_production && ! self::$full_replace )
-				? self::CHANGE_KEPT
-				: self::change_for( $before, $after );
+			/*
+			 * Meta absent from the package is REMOVED, on both paths.
+			 *
+			 * This used to report `kept` for a deploy, because the importer only wrote
+			 * the keys it was given. It now deletes deployable meta the package no
+			 * longer carries — the fix for "clearing a Yoast description on Staging left
+			 * it live on Production" — so `kept` would be the promise that is wrong.
+			 *
+			 * Nothing else moves with it: taxonomies and the featured image are still
+			 * only replaced when the package mentions them, so those two keep the
+			 * $full_replace distinction below.
+			 */
+			$change = self::change_for( $before, $after );
 
 			$fields[] = self::field(
 				$key,
@@ -361,10 +370,10 @@ final class PackageDiff {
 			return (string) $value;
 		}
 
-		$encoded = wp_json_encode( $value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		$encoded = Json::encode( $value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 
-		// wp_json_encode returns false on invalid UTF-8; fall back to a form that
-		// still diffs rather than showing an empty (falsely "removed") value.
-		return is_string( $encoded ) ? $encoded : print_r( $value, true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+		// Encoding can fail; fall back to a form that still diffs rather than showing an
+		// empty (and therefore falsely "removed") value.
+		return null !== $encoded ? $encoded : print_r( $value, true ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
 	}
 }

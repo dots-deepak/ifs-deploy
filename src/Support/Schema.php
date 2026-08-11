@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Support;
 
+use IfsDeploy\Export\OptionExporter;
+
 /**
  * Owns the database schema and version-gated migrations.
  *
@@ -18,6 +20,16 @@ namespace IfsDeploy\Support;
  *       Production. Without it, editing a page and then undoing the edit left the row
  *       sitting in Pending Changes, because upsert() could only compare against the
  *       previous PENDING hash and had no idea what Production already holds.
+ *   4 — the `api_log` table.
+ *   5 — the `nonces` table (replay protection).
+ *   6 — no schema change. `OptionExporter::option_id()` stopped deriving an option's
+ *       queue id from crc32, so the rows filed under the old value are re-keyed —
+ *       see migrate().
+ *   7 — queue gains `baseline_hash`: the state an object held BEFORE its pending change
+ *       began. Editing something and then undoing the edit used to leave the row queued
+ *       for ever, because the row only remembered the state it was changed TO.
+ *       Also collapses duplicate rows for one object, now that identity is
+ *       (object_type, object_id) rather than including the subtype.
  */
 final class Schema {
 
@@ -53,6 +65,89 @@ final class Schema {
 				"UPDATE {$table} SET deployed_hash = object_hash WHERE deployed_hash = '' AND status = 'deployed'"
 			);
 		}
+
+		if ( version_compare( $from, '6', '<' ) && '0' !== $from ) {
+			self::rekey_option_rows();
+		}
+
+		if ( version_compare( $from, '7', '<' ) && '0' !== $from ) {
+			self::collapse_duplicate_rows();
+		}
+	}
+
+	/**
+	 * Leave one queue row per object, now that the subtype no longer identifies it.
+	 *
+	 * While identity included the subtype, one object could hold several rows — a mime
+	 * type or post type that changed produced a row the earlier ones never deduped
+	 * against, and Pending Changes listed the same object several times. `find()` now
+	 * ignores the subtype, so new writes converge on their own; this clears what the old
+	 * rule already wrote.
+	 *
+	 * The HIGHEST id wins. Rows are updated in place, so duplicates only ever arise from
+	 * a later insert, which therefore holds the most recent state.
+	 *
+	 * A plain DELETE with a self-join: this runs once, and the row count is the number
+	 * of pending changes on a site, not a table scan worth worrying about.
+	 */
+	private static function collapse_duplicate_rows(): void {
+		global $wpdb;
+
+		$table = self::queue_table();
+
+		$wpdb->query( // phpcs:ignore WordPress.DB
+			"DELETE older FROM {$table} AS older
+			 INNER JOIN {$table} AS newer
+			     ON older.object_type = newer.object_type
+			    AND older.object_id   = newer.object_id
+			    AND older.id          < newer.id"
+		);
+	}
+
+	/**
+	 * Re-file existing option rows under the new `OptionExporter::option_id()`.
+	 *
+	 * The id is derived from the option NAME, so changing how it is derived moves every
+	 * option's row. Left alone, each one becomes an orphan the observer can never find
+	 * again: the next change to that option inserts a SECOND row beside it, so Pending
+	 * Changes lists the same option twice and the stale copy can never be resolved.
+	 *
+	 * Row by row in PHP rather than one `UPDATE ... SET object_id = ...`:
+	 *
+	 *  - the queue's UNIQUE key covers (object_type, object_subtype, object_id), and a
+	 *    bulk update walks rows in an arbitrary order, so a row moving onto an id that a
+	 *    not-yet-migrated row still occupies would abort the whole statement partway
+	 *    through and leave the table half-converted;
+	 *  - `$wpdb->update()` failing for one row leaves the others done, which is the
+	 *    right failure mode here;
+	 *  - and the id has exactly one definition, in `OptionExporter`. Repeating the md5
+	 *    as SQL would be a second copy that has to agree with the PHP for ever.
+	 *
+	 * Skipped on a fresh install ('0'), where there is nothing to re-key.
+	 */
+	private static function rekey_option_rows(): void {
+		global $wpdb;
+
+		$table = self::queue_table();
+
+		$rows = (array) $wpdb->get_results( // phpcs:ignore WordPress.DB
+			"SELECT id, object_title FROM {$table} WHERE object_type = 'option'"
+		);
+
+		foreach ( $rows as $row ) {
+			$name = (string) $row->object_title;
+			if ( '' === $name ) {
+				continue;
+			}
+
+			$wpdb->update(
+				$table,
+				array( 'object_id' => OptionExporter::option_id( $name ) ),
+				array( 'id' => (int) $row->id ),
+				array( '%d' ),
+				array( '%d' )
+			);
+		}
 	}
 
 	/**
@@ -80,6 +175,7 @@ final class Schema {
 				action varchar(20) NOT NULL,
 				object_hash varchar(32) NOT NULL DEFAULT '',
 				deployed_hash varchar(32) NOT NULL DEFAULT '',
+				baseline_hash varchar(32) NOT NULL DEFAULT '',
 				status varchar(20) NOT NULL DEFAULT 'pending',
 				user_id bigint(20) unsigned NOT NULL DEFAULT 0,
 				created_at datetime NOT NULL,

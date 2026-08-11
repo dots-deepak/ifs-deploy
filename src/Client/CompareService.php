@@ -49,9 +49,10 @@ final class CompareService {
 			);
 		}
 
-		$remote      = is_array( $response['body']['index'] ?? null ) ? $response['body']['index'] : array();
-		$local       = SiteIndex::build();
-		$staging_sid = (string) Credentials::get()['site_id'];
+		$remote       = is_array( $response['body']['index'] ?? null ) ? $response['body']['index'] : array();
+		$local_report = SiteIndex::report();
+		$local        = $local_report['index'];
+		$staging_sid  = (string) Credentials::get()['site_id'];
 
 		$maps    = $this->index_maps( $remote, $staging_sid );
 		$matched = array();
@@ -83,6 +84,45 @@ final class CompareService {
 			'rows'      => $rows,
 			'prod_only' => $prod_only,
 			'summary'   => $this->summarize( $rows, $prod_only ),
+			'truncated' => $this->truncation_warning(
+				(bool) $local_report['truncated'],
+				! empty( $response['body']['truncated'] ),
+				(int) $local_report['limit']
+			),
+		);
+	}
+
+	/**
+	 * Say so when either side's index stopped short, or '' when neither did.
+	 *
+	 * This comparison is only as complete as the two lists behind it, and the failure
+	 * is not a blank screen — it is a confident, wrong verdict. Anything past the cut
+	 * on Staging is reported as "Not on Production", and anything past the cut on
+	 * Production as "Only on Production", because in both cases the counterpart is
+	 * simply missing from the data. Acting on the first creates a duplicate of a page
+	 * that already exists.
+	 *
+	 * Naming which side ran over matters: the fix is the same filter, but it has to be
+	 * applied on that site.
+	 */
+	private function truncation_warning( bool $local, bool $remote, int $limit ): string {
+		if ( ! $local && ! $remote ) {
+			return '';
+		}
+
+		if ( $local && $remote ) {
+			$where = __( 'Both this site and Production have', 'ifs-deploy' );
+		} elseif ( $local ) {
+			$where = __( 'This site has', 'ifs-deploy' );
+		} else {
+			$where = __( 'Production has', 'ifs-deploy' );
+		}
+
+		return sprintf(
+			/* translators: 1: which site(s) ran over the limit, 2: the limit */
+			__( '%1$s more than %2$d objects, so this comparison covers only the first %2$d and the rest are not reported at all. Anything beyond the limit will show incorrectly as "Not on Production" or "Only on Production" — do not push from this screen until the limit is raised with the ifs_deploy_index_limit filter.', 'ifs-deploy' ),
+			$where,
+			$limit
 		);
 	}
 

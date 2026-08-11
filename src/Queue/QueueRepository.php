@@ -17,19 +17,30 @@ final class QueueRepository {
 	public const STATUS_IGNORED  = 'ignored';
 
 	/**
+	 * The object was edited and then put back to where it started, so there is
+	 * nothing to push. Distinct from `deployed`, which asserts something this cannot:
+	 * that the state in question was ever sent to Production.
+	 */
+	public const STATUS_UNCHANGED = 'unchanged';
+
+	/**
 	 * Insert a new pending item or update the existing one for this object.
 	 *
 	 * When the object's hash is unchanged from the stored row, this is a no-op
 	 * (returns false) — that is the smart-queue skip.
 	 *
+	 * @param string $baseline Hash of the object BEFORE this pending change began, when
+	 *                         the caller knows it and no row exists yet to carry one.
+	 *                         Editing back to it resolves the row. See PostObserver.
+	 *
 	 * @return bool True when a row was written/updated, false when skipped.
 	 */
-	public function upsert( string $type, string $subtype, int $object_id, string $title, string $action, string $hash ): bool {
+	public function upsert( string $type, string $subtype, int $object_id, string $title, string $action, string $hash, string $baseline = '' ): bool {
 		global $wpdb;
 
 		$table    = Schema::queue_table();
 		$now      = current_time( 'mysql' );
-		$existing = $this->find( $type, $subtype, $object_id );
+		$existing = $this->find( $type, $object_id );
 
 		// Attribution is captured here rather than passed in by every observer.
 		// One row per object means this records the LAST person to touch it, which is
@@ -42,20 +53,45 @@ final class QueueRepository {
 				return false;
 			}
 
-			// The object is back to exactly what was last deployed, so there is nothing
-			// to push. This is what makes "edit a page, then undo the edit" clear the
-			// row instead of leaving it queued forever — and it also stops a save that
-			// changed nothing from re-queueing an already-deployed object.
+			/*
+			 * WHAT STATE DOES "NOTHING TO PUSH" MEAN FOR THIS ROW?
+			 *
+			 * Two answers, and both have to be kept:
+			 *
+			 *  - `deployed_hash` — what Production last accepted. Editing back to it is
+			 *    genuinely nothing to push.
+			 *  - `baseline_hash` — what the object held before this pending change began.
+			 *    Editing back to THAT is also nothing to push, and it is the only answer
+			 *    available for an object IFS Deploy has never deployed. Without it, "I
+			 *    changed my mind and undid it" left the row queued for ever, because the
+			 *    row only ever remembered the state it was changed TO.
+			 *
+			 * A row leaving a settled state supplies its own baseline for free: whatever
+			 * it held while settled is exactly the state to return to. The caller only
+			 * has to provide one when there is no row at all.
+			 */
+			$settled  = self::STATUS_PENDING !== $existing->status;
+			$baseline = $settled
+				? (string) $existing->object_hash
+				: (string) ( $existing->baseline_hash ?? '' );
+
 			$deployed_hash = (string) ( $existing->deployed_hash ?? '' );
 
+			$resolved_as = '';
 			if ( '' !== $deployed_hash && $hash === $deployed_hash ) {
+				$resolved_as = self::STATUS_DEPLOYED;
+			} elseif ( '' !== $baseline && $hash === $baseline ) {
+				$resolved_as = self::STATUS_UNCHANGED;
+			}
+
+			if ( '' !== $resolved_as ) {
 				if ( self::STATUS_PENDING === $existing->status ) {
 					$wpdb->update(
 						$table,
 						array(
 							'object_title' => $title,
 							'object_hash'  => $hash,
-							'status'       => self::STATUS_DEPLOYED,
+							'status'       => $resolved_as,
 							'updated_at'   => $now,
 						),
 						array( 'id' => (int) $existing->id ),
@@ -70,15 +106,20 @@ final class QueueRepository {
 			$wpdb->update(
 				$table,
 				array(
-					'object_title' => $title,
-					'action'       => $action,
-					'object_hash'  => $hash,
-					'status'       => self::STATUS_PENDING,
-					'user_id'      => $user_id,
-					'updated_at'   => $now,
+					// The subtype travels with the row rather than identifying it — see
+					// find(). A mime type or post type that changes must not strand the
+					// row it belongs to.
+					'object_subtype' => $subtype,
+					'object_title'   => $title,
+					'action'         => $action,
+					'object_hash'    => $hash,
+					'baseline_hash'  => $baseline,
+					'status'         => self::STATUS_PENDING,
+					'user_id'        => $user_id,
+					'updated_at'     => $now,
 				),
 				array( 'id' => (int) $existing->id ),
-				array( '%s', '%s', '%s', '%s', '%d', '%s' ),
+				array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s' ),
 				array( '%d' )
 			);
 
@@ -94,26 +135,44 @@ final class QueueRepository {
 				'object_title'   => $title,
 				'action'         => $action,
 				'object_hash'    => $hash,
+				'baseline_hash'  => $baseline,
 				'status'         => self::STATUS_PENDING,
 				'user_id'        => $user_id,
 				'created_at'     => $now,
 				'updated_at'     => $now,
 			),
-			array( '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+			array( '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
 		);
 
 		return true;
 	}
 
-	public function find( string $type, string $subtype, int $object_id ): ?object {
+	/**
+	 * The one row for an object, whatever its subtype currently says.
+	 *
+	 * IDENTITY IS (type, object_id) — NOT the subtype.
+	 *
+	 * The subtype is a mime type for media and a post type for posts, and both are
+	 * *content*: they can change while the object stays the same one. Matching on it
+	 * meant every distinct value produced its OWN row that the others never deduped
+	 * against, so one attachment could accumulate a row per mime type it had ever
+	 * reported — the "several tracked items for a single media update" report. Object
+	 * ids are unique per type in WordPress (posts, attachments and terms all draw from
+	 * their own unique sequences), so dropping the subtype loses no precision.
+	 *
+	 * The UNIQUE key on (object_type, object_subtype, object_id) still stands; this is
+	 * strictly narrower, so it cannot be violated by anything written through here.
+	 */
+	public function find( string $type, int $object_id ): ?object {
 		global $wpdb;
 
 		$table = Schema::queue_table();
 		$row   = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT * FROM {$table} WHERE object_type = %s AND object_subtype = %s AND object_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				// Newest first, so a table still holding pre-migration duplicates
+				// converges on the most recent one instead of reviving a stale row.
+				"SELECT * FROM {$table} WHERE object_type = %s AND object_id = %d ORDER BY id DESC LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL
 				$type,
-				$subtype,
 				$object_id
 			)
 		);

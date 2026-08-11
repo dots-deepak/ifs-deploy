@@ -65,7 +65,7 @@ which is why Diagnostics checks Production for each expected class by name (§20
   `composer install` is required on the server** and there is no `vendor/`.
 - WordPress coding-style-ish (tabs, `esc_*`, nonces, capability checks).
 - **86 classes in `src/`**, all lint-clean.
-- **31 test suites + 6 repo-wide checks, 1590 assertions**, runnable without WordPress. See §24.
+- **34 test suites + 6 repo-wide checks, 1653 assertions**, runnable without WordPress. See §24.
 
 ### Naming — one plugin, six spellings
 
@@ -582,8 +582,8 @@ diagnostics (§20).
 
 ## 18. Deferred / not done (honest status)
 
-- **Preview Changes for non-posts** — the diff (see §19) covers post types only;
-  term/option/media/menu rows show "—" in the Preview column.
+- **Preview Changes for terms, options and menus** — the diff (§19) covers post types
+  AND media (§26b); term/option/menu rows still show "—" in the Preview column.
 - **Compare & Sync for non-posts** — terms/options/media/menus aren't in the
   Compare diff yet.
 - ~~Persisted replay/nonce store~~ — **done**, DB v5 `nonces` table with a UNIQUE index (§5).
@@ -1116,7 +1116,7 @@ describe the deployment relationship, not the content.
 
 ## 24. Test suites
 
-Live in **`tests/`**. **31 suites + 6 repo-wide checks, 1590 assertions, all passing.** Plain
+Live in **`tests/`**. **34 suites + 6 repo-wide checks, 1653 assertions, all passing.** Plain
 PHP — no WordPress, no PHPUnit, no `composer install`; each suite stubs the handful of WordPress
 functions it touches.
 
@@ -1153,6 +1153,7 @@ php tests/access-test.php        # one suite
 | `postmatch` | 30 | ID-parity corroboration, `post_date_gmt`, featured-image parity (§26) |
 | `contracts` | 28 | **cross-file agreements** — see below |
 | `metadelete` | 22 | meta removed on Staging is removed on Production, and what cannot be (§26b) |
+| `mediadiff` | 28 | the media "View changes" diff, and what it must never report (§26b) |
 | `queue-revert` | 39 | edit → deploy → edit → undo (§23), undo without ever deploying, one row per object (§26b) |
 | `url` · `rollback-diff` | 17 each | URL variants (§19); snapshot → package semantics (§22) |
 | `verifier` | 16 | which queue rows may be cleared; fails closed (§23) |
@@ -1474,20 +1475,119 @@ Gap worth knowing: terms, options, media and menus have no pre-edit hook, so the
 change to one of those still relies on the free path (which needs an existing settled
 row) or on `QueueVerifier`.
 
-### 3. One media update produced several tracked items
+### 3. One media update produced several tracked items — and the real cause
 
-The queue's identity was `(object_type, object_subtype, object_id)` — and the subtype is
-a **mime type** for media and a **post type** for posts. Both are content: they can
-change while the object stays the same one. Every distinct value therefore got its own
-row that the others never deduped against.
+Reported as eight rows for one attachment. **The diagnosis is worth recording, because
+the obvious reading was wrong.** All eight showed `media` + `image/png`, and the queue
+has `UNIQUE KEY object_identity (object_type, object_subtype, object_id)` — so those
+eight rows are arithmetically impossible while that key exists. Confirmed with the user
+that only ONE image existed, which leaves exactly one explanation:
 
-`QueueRepository::find()` now identifies a row by `(object_type, object_id)` alone and
-carries the subtype as data. Object ids are unique per type in WordPress, so nothing is
-lost. DB v7 collapses existing duplicates (highest id wins — rows are updated in place,
-so a duplicate is always the newer insert). The UNIQUE key is unchanged; the new rule is
-strictly narrower, so it cannot be violated.
+**The UNIQUE key was not on the table.** `dbDelta()` declares it in `CREATE TABLE` but is
+unreliable at *adding* an index to a table that already exists, and it reports nothing
+when it fails. Without it, `upsert()`'s read-then-write is not atomic — two concurrent
+saves of one object both find nothing and both insert. Eight rows in the same second is
+the signature of exactly that. It is also self-perpetuating: MySQL refuses to add a
+unique index while duplicates exist, so the rows it allowed then block its own repair.
 
-Covered by `queue-revert-test.php`, extended to 39 cases across all three of the above.
+Four layers now, so correctness never depends on any single one:
+
+1. **`Schema::ensure_object_identity_index()`** asks the table (`SHOW INDEX`) rather than
+   trusting dbDelta, clears duplicates, then re-adds the key. Runs on activation and on
+   every schema upgrade. A database that still refuses it is logged, not fataled.
+2. **Identity no longer includes the subtype.** `QueueRepository::find()` keys on
+   `(object_type, object_id)`. The subtype is a mime type for media and a post type for
+   posts — both *content*, both able to change while the object stays the same one, so
+   each distinct value used to get a row the others never deduped against. Object ids are
+   unique per type in WordPress, so nothing is lost.
+3. **`get_by_status()` dedupes on read**, keeping the highest id per object. Status is
+   deliberately *not* in that subquery: the invariant is one row per object outright,
+   which is what the UNIQUE key enforces too.
+4. **`collapse_duplicates()`** physically removes duplicates when Pending Changes renders
+   — hiding is not fixing, since a hidden row still counts in `users_with_status()`. It
+   runs *before* verification, or a stale duplicate would be probed against Production
+   and offered for pushing alongside the row superseding it.
+
+Separately, the list was **confusing even when correct**: WordPress names an attachment
+after its file, so uploading `test.png` repeatedly gives every copy the title `test`, and
+the Object column showed nothing else. Pending Changes now prints the object id
+(`test #1240`), as Compare & Sync always has.
+
+**And that id column immediately paid for itself.** The next report showed eight rows
+with ids 63817–63824 — **consecutive**, same second, seven titled `sstest` and one
+`1223`. Consecutive ids mean eight attachments genuinely exist: the queue was tracking
+eight real objects, and something else on the site was creating the other seven. Nothing
+inside the queue can fix that, so three things were added instead:
+
+- **Generated sizes are never tracked** (`AttachmentObserver::is_generated_size()`). A
+  `-300x200` derivative is output, not content — §12 already withholds
+  `_wp_attachment_metadata` so Production regenerates its own sizes. Plugins that
+  register derivatives as real attachments would otherwise give each one a pending
+  change. Precision matters here: a genuine upload called `banner-1920x1080.jpg` matches
+  the same pattern, so it is only skipped when the **un-suffixed file exists as an
+  attachment in its own right** — which is what makes it a derivative *of* something.
+- **`ifs_deploy_track_attachment`** excludes anything else a given site produces.
+- **Every media queue write is logged** with the FILE, the hook (`current_filter()`) and
+  the first non-plugin stack frame. That is what settles a live case: several distinct
+  files means several uploads, `-WxH` names mean generated sizes, and the same path twice
+  means duplicate rows for one file. The backtrace uses
+  `DEBUG_BACKTRACE_IGNORE_ARGS` — argument values can hold post content and credentials
+  and must never reach a log.
+
+Media rows also show their file name now, since `sstest.png`, `sstest-1.png`,
+`sstest-2.png` explains at a glance what several same-titled rows actually are.
+
+**And that file name settled it.** The next report showed seven rows, ids 63818–63824,
+every one with `_wp_attached_file` = `sstest-1.png`. Not generated sizes (no `-WxH`), not
+separate uploads (those would be `sstest-2.png`, `sstest-3.png`): **seven attachment
+records for ONE file.**
+
+That makes merging them correct rather than merely tidy. `MediaImporter::find_existing()`
+resolves an incoming attachment by its recorded **source URL**, and records sharing a file
+share a source URL — so pushing all seven produces exactly ONE attachment on Production,
+each overwriting the last. Seven rows described an outcome that could not happen.
+
+- **`AttachmentObserver::canonical_for_file()`** redirects every duplicate to the LOWEST
+  id. Deterministic on purpose: whichever record is saved, in whatever order, all of them
+  converge on the same single row — verified in both directions. The lowest id is also the
+  original record; the rest are the artefacts.
+- **`QueueRepository::collapse_media_by_file()`** does the same for rows already written,
+  because those six duplicates may never be saved again and nothing else would ever clear
+  them. Meta for every row is primed in one query rather than one per row.
+- An attachment whose file is **unknown** is left strictly alone — with nothing to group
+  on, "duplicate" cannot be established, and this must never guess.
+
+Worth stating plainly in the handover: this treats the SYMPTOM. Something on that site is
+creating seven attachment records per file, which pollutes the Media Library too. The
+`triggered` field in the log names the caller.
+
+Covered by `queue-revert-test.php` (39), `idspace-test.php` and `mediatrack-test.php`
+(20, including the reported case in both save orders).
+
+### 4. Media rows now have a "View changes" preview
+
+Previously the Preview column showed "—" for media, so after editing an image there was
+no way to see what had actually changed. Media rows now open the same dialog a page does,
+built by the same `Admin\DiffRenderer` — no special case in the renderer at all.
+
+- `PackageDiff::compare()` **dispatches on the package type**. A media package has no
+  `post_content`, no taxonomies and no featured image, so running it through the post
+  shape would report its real differences as nothing at all.
+- Compared: title, caption, description, slug, file type, order, alt text and attachment
+  meta.
+- **Not** compared, because each would flag every object on every push: `source_url`
+  (carries the domain), `post_date` (upload time), `post_parent` (a per-site id).
+- The **filename is** compared, but `Rest\ObjectEndpoint` substitutes
+  `MediaIdentity::stable_filename()` into Production's reply first, recovering the
+  original name from the source-URL stamp. Otherwise a `-1` suffix Production added
+  itself (`wp_upload_bits()` never overwrites) would read as a difference for ever — the
+  same trap §23 fixed for featured images. Safe to substitute because that package is
+  only ever diffed; a real import builds its own on the sending side.
+- Production resolves the attachment with `MediaImporter::find_existing()` — the same
+  matcher the import uses, so the panel describes the attachment a push would really
+  update.
+
+Covered by `mediadiff-test.php` (28 cases). Terms, options and menus still show "—".
 
 ---
 

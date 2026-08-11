@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.1.0
+Stable tag: 0.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -110,6 +110,71 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 
 == Changelog ==
 
+= 0.4.0 =
+Several media records for one file are now tracked as one pending change.
+
+* **A file with more than one media record is tracked once.** WordPress can end up
+  holding several media records that all point at the same file, and each was appearing
+  as its own pending change. That was misleading as well as untidy: deploying all of them
+  produces a single file on Production regardless, because they share one source address.
+  The original record is tracked and the rest are merged into it, both as changes happen
+  and for entries already in the list.
+* Note this treats the symptom. If one file has several media records, something on the
+  site is creating them — the log names the file, the hook and the caller for each media
+  change, which is where to look.
+
+= 0.3.0 =
+Fixes duplicate entries in Pending Changes, and adds a change preview for media.
+
+* **Generated image sizes are no longer tracked as separate media items.** The original
+  file is what deploys; Production regenerates its own sizes. Some plugins register those
+  derivatives as real attachments, and each one was appearing as its own pending change.
+* **Media entries now show their file name**, so several attachments that share a title —
+  which happens whenever the same file is uploaded more than once — can be told apart.
+* **Every media change is written to the log** with the file it belongs to and the hook
+  that fired, so unexpected entries can be traced to whatever created them.
+* Attachments can be excluded from tracking with the `ifs_deploy_track_attachment`
+  filter.
+
+* **The same item can no longer appear more than once in Pending Changes.** On some
+  sites the queue table was missing the database key that prevents it, so two saves of
+  one object at the same moment each added a row — which is how a single image came to
+  be listed eight times. The key is now checked and rebuilt on activation, existing
+  duplicates are merged, and the list is de-duplicated as it is drawn.
+* **Each entry now shows its object ID.** WordPress names an uploaded file's attachment
+  after the file, so several copies of `photo.png` are all titled "photo". Without the ID
+  they were impossible to tell apart.
+* **"View changes" now works for media.** Editing an image's title, caption, description,
+  slug, alt text or custom fields shows a before/after just like a page does. The file's
+  address and upload date are excluded, since those differ between sites by nature.
+
+= 0.2.0 =
+Correctness release. Both sites must be updated together, and the database upgrade runs
+automatically on each (schema versions 6 and 7).
+
+* **Removing a value now syncs.** Clearing a field on Staging — a Yoast SEO meta
+  description is the common case — removes it on Production too. Previously only added
+  and edited values travelled, so a deleted description stayed live. Protected keys
+  (editor locks, caches, featured-image links) are never touched; use the
+  `ifs_deploy_delete_missing_meta` filter to switch the behaviour off.
+* **Undoing an edit clears it from Pending Changes**, even for content that has never
+  been deployed.
+* **One queue entry per object.** Updating a media item's title or alt text no longer
+  produces several tracked entries for the same file.
+* **Safer matching on Production.** A deploy will no longer overwrite an unrelated
+  Production post that merely shares an ID with the Staging one.
+* Publish dates no longer drift when the two sites use different timezones.
+* Featured images keep their ID across sites, so ACF image fields pointing at them
+  resolve.
+* Compare & Sync warns when either site has more content than the comparison covers,
+  instead of reporting the remainder as missing.
+* A deployment can only be rolled back once; a second attempt is refused rather than
+  silently re-applying the snapshot.
+* Deployment results are matched to the right queue entry when different object types
+  share an ID.
+* Rollback points, request bodies and content hashes are no longer written empty if a
+  value cannot be encoded — the operation fails and says so instead.
+
 = 0.1.0 =
 * First release.
 * Signed REST connection in both directions, with replay protection and route-bound
@@ -123,6 +188,18 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.4.0 =
+Several media records for one file now count as one pending change. Includes everything
+in 0.2.0 and 0.3.0, so update both sites together; the database upgrade runs itself.
+
+= 0.3.0 =
+Fixes duplicate Pending Changes entries and adds a change preview for media. Includes
+everything in 0.2.0, so update both sites together; the database upgrade runs itself.
+
+= 0.2.0 =
+Correctness fixes to deleting, reverting and matching content. Update both sites
+together; the database upgrade runs itself.
 
 = 0.1.0 =
 First release. Install on both sites and pair them from Settings.

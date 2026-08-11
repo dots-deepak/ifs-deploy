@@ -1,0 +1,70 @@
+# What must NOT go into the release zip.
+#
+# One list, honoured by `build-release.php` and by `wp dist-archive` if you use WP-CLI, so the
+# two can never disagree about what ships.
+#
+# The rule applied here: a file ships if a SITE needs it at runtime. Everything that only a
+# developer needs stays behind. Excluding a needed file breaks the plugin; including an
+# unneeded one bloats the download and, for the dev docs below, publishes notes that were
+# never written for an audience.
+
+# --- Version control / editor -----------------------------------------------
+.git
+.gitignore
+.gitattributes
+.distignore
+.vscode
+.idea
+
+# --- Build tooling ----------------------------------------------------------
+#
+# `tools/` is the 39 MB Tailwind standalone binary. `tailwind.config.js` only matters when
+# rebuilding the CSS, which is done before packaging, never on a site.
+tools
+tailwind.config.js
+build-release.php
+
+# --- Tests ------------------------------------------------------------------
+#
+# ~460 KB of suites and harnesses. They stub WordPress rather than loading it, so they are
+# useless on a real install, and they would be the only PHP in the zip that is not part of the
+# plugin.
+tests
+
+# --- Developer documentation ------------------------------------------------
+#
+# DESIGN.md is the design system and build instructions. PLUGIN-CONTEXT.md holds naming
+# research, competitor notes and internal decisions — it was written for the team, not for
+# users, and it must not be published. SPRINT-PLAN.txt is a worklog.
+#
+# SECURITY.md deliberately DOES ship: readme.txt points users at it, and it is the honest
+# record of what was audited. Everything in it is derivable from the PHP source, which ships
+# anyway, so it discloses nothing new.
+DESIGN.md
+PLUGIN-CONTEXT.md
+SPRINT-PLAN.txt
+
+# --- Dependency manifest ----------------------------------------------------
+#
+# The autoloader is hand-rolled and there is no `vendor/`, so composer.json serves local
+# tooling only. Nothing on a site reads it.
+composer.json
+composer.lock
+vendor
+node_modules
+package.json
+package-lock.json
+
+# --- Build output -----------------------------------------------------------
+*.zip
+
+# --- Noise ------------------------------------------------------------------
+*.log
+*.sql
+*.bak
+*.orig
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+._*

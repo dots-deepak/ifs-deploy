@@ -34,6 +34,14 @@ final class PendingChangesPage {
 		$sees_all = Access::sees_all();
 		$filter   = $this->requested_filter( $sees_all );
 
+		// Repair before anything reads the table: a stale duplicate left by an older
+		// build would otherwise be counted, verified and offered for pushing alongside
+		// the row that supersedes it.
+		// Two shapes of duplicate, and they are not the same thing: the same object listed
+		// twice, and several attachment records for ONE file — which a push can only ever
+		// turn into a single attachment on Production.
+		$collapsed = $queue->collapse_duplicates() + $queue->collapse_media_by_file();
+
 		// Resolve rows that no longer differ from Production BEFORE listing, so the
 		// screen only ever shows work that actually needs doing. Best-effort: if
 		// Production is unreachable the list just renders unverified.
@@ -52,6 +60,25 @@ final class PendingChangesPage {
 
 		if ( ! $sees_all ) {
 			echo '<p class="description">' . esc_html__( 'Showing the changes you made. Ask an administrator if you need to see everyone’s changes.', 'ifs-deploy' ) . '</p>';
+		}
+
+		// Same principle as below: rows must not vanish without a word.
+		if ( $collapsed > 0 ) {
+			printf(
+				'<div class="notice notice-info is-dismissible"><p>%s</p></div>',
+				esc_html(
+					sprintf(
+						/* translators: %d: number of duplicate rows merged */
+						_n(
+							'%d duplicate entry for an object already listed was merged into it.',
+							'%d duplicate entries for objects already listed were merged into them.',
+							$collapsed,
+							'ifs-deploy'
+						),
+						$collapsed
+					)
+				)
+			);
 		}
 
 		// Explain the disappearance rather than letting rows vanish silently.
@@ -130,7 +157,7 @@ final class PendingChangesPage {
 			printf(
 				'<tr data-queue-id="%1$d">
 					<th scope="row" class="check-column"><input type="checkbox" class="ifs-deploy-item" value="%1$d" data-mine="%9$d" /></th>
-					<td><strong>%2$s</strong></td>
+					<td><strong>%2$s</strong><span class="dp-id">#%10$d</span>%11$s</td>
 					<td>%3$s</td>
 					<td>%4$s</td>
 					<td>%5$s</td>
@@ -154,7 +181,22 @@ final class PendingChangesPage {
 				 * something different from what happens is worse than no dialog. This is
 				 * presentation only; the server still narrows the ids either way.
 				 */
-				(int) ( (int) ( $item->user_id ?? 0 ) === get_current_user_id() ? 1 : 0 )
+				(int) ( (int) ( $item->user_id ?? 0 ) === get_current_user_id() ? 1 : 0 ),
+
+				/*
+				 * The OBJECT's id — the attachment/post/term id, not the queue row's.
+				 *
+				 * Without it, rows are identified by title alone, and titles are not
+				 * unique: WordPress names an attachment after its file, so uploading
+				 * `test.png` more than once produces several attachments all called
+				 * "test". Eight of those in a list read as one item tracked eight times,
+				 * when they are eight different files each with a genuine pending change.
+				 * Compare & Sync has shown this id for exactly this reason; Pending
+				 * Changes did not.
+				 */
+				(int) $item->object_id,
+
+				$this->file_hint( $item )
 			);
 		}
 
@@ -290,13 +332,38 @@ final class PendingChangesPage {
 	}
 
 	/**
+	 * The file behind a media row, or '' for everything else.
+	 *
+	 * An attachment's title comes from its file name, so uploading `sstest.png` more
+	 * than once gives EVERY copy the title "sstest" — a list of them reads as one item
+	 * tracked repeatedly when it is really several separate files. The id distinguishes
+	 * them; the file name explains them, because `sstest.png`, `sstest-1.png`,
+	 * `sstest-2.png` says at a glance what happened.
+	 */
+	private function file_hint( object $item ): string {
+		if ( 'media' !== (string) $item->object_type ) {
+			return '';
+		}
+
+		$file = (string) get_post_meta( (int) $item->object_id, '_wp_attached_file', true );
+
+		if ( '' === $file ) {
+			return '';
+		}
+
+		return '<span class="dp-help ifs-deploy-file">' . esc_html( basename( $file ) ) . '</span>';
+	}
+
+	/**
 	 * "View changes" trigger for the rows a field-level diff exists for.
 	 *
-	 * Only post-type rows can be diffed field by field; the other types still
-	 * deploy exactly as before, they just have no preview to show.
+	 * Posts and MEDIA. A media row shows what a push would change about the attachment
+	 * — title, caption, description, alt text, slug and its meta — which is exactly the
+	 * question "I edited this image, what did I actually change?" asks. Terms, options
+	 * and menus still deploy as before; they just have no preview yet.
 	 */
 	private function preview_cell( object $item ): string {
-		if ( 'post' !== (string) $item->object_type ) {
+		if ( ! in_array( (string) $item->object_type, array( 'post', 'media' ), true ) ) {
 			return '<span class="description">&mdash;</span>';
 		}
 

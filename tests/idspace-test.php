@@ -69,6 +69,55 @@ $service = (string) php_strip_whitespace( $root . '/src/Client/DeploymentService
 ok( 'finalize() reads the type back off the result', false !== strpos( $service, "\$result['type'] ?? 'post'" ) );
 ok( 'and no bare object-id key remains', 0 === preg_match( '/\$mapped\[\s*\(int\)\s*\$item->object_id\s*\]/', $service ) );
 
+echo "\n=== one row per object at READ time as well, and it self-heals ===\n";
+//
+// Writing is already safe (find() keys on type + object_id), but a row left by an older
+// build, or reaching the table another way, must still never be listed twice. With
+// several people working at once, a list that shows the same object twice makes "what am
+// I about to push?" unanswerable.
+$repo = (string) php_strip_whitespace( $root . '/src/Queue/QueueRepository.php' );
+
+ok( 'the listing query keeps only the newest row per object', (bool) preg_match( '/SELECT MAX\(d\.id\).*?d\.object_type = q\.object_type.*?d\.object_id = q\.object_id/s', $repo ) );
+// Status is deliberately NOT in the subquery: the invariant is one row per object
+// outright, which is also what the UNIQUE key enforces across every status.
+ok( 'and does not scope that per status', 0 === preg_match( '/SELECT MAX\(d\.id\).*?d\.status = q\.status/s', $repo ) );
+ok( 'both the all-users and per-user queries carry it', 2 === preg_match_all( '/SELECT MAX\(d\.id\)/', $repo ) );
+ok( 'and duplicates are physically removed, not just hidden', false !== strpos( $repo, 'function collapse_duplicates()' ) );
+
+echo "\n=== the UNIQUE key is verified, not assumed ===\n";
+//
+// THE REPORTED CASE: eight queue rows for ONE attachment, all created in the same
+// second. That is impossible while the UNIQUE key exists — so on that site it did not.
+// dbDelta declares it in CREATE TABLE but is unreliable at ADDING an index to a table
+// that already exists, and it reports nothing when it fails.
+$schema_src = (string) php_strip_whitespace( $root . '/src/Support/Schema.php' );
+
+ok( 'the index is checked explicitly', false !== strpos( $schema_src, 'ensure_object_identity_index' ) );
+ok( 'by asking the table, not by trusting dbDelta', false !== strpos( $schema_src, 'SHOW INDEX FROM' ) );
+ok( 'and rebuilt when missing', false !== strpos( $schema_src, 'ADD UNIQUE KEY object_identity' ) );
+// MySQL refuses to add a unique index while duplicates exist, which is why a missing key
+// is self-perpetuating: the duplicates it allowed then block its own repair.
+$collapse_at = strpos( $schema_src, 'collapse_duplicate_rows()' );
+$alter_at    = strpos( $schema_src, 'ADD UNIQUE KEY object_identity' );
+ok( 'duplicates are cleared BEFORE the key is added', false !== $collapse_at && false !== $alter_at && $collapse_at < $alter_at );
+ok( 'a database that refuses it is logged, not fataled', (bool) preg_match( '/false === \$added.*?DebugLog::error/s', $schema_src ) );
+ok( 'and the check runs on every install/upgrade', (bool) preg_match( '/function install\(\).*?ensure_object_identity_index\(\)/s', $schema_src ) );
+
+$pending_page = (string) php_strip_whitespace( $root . '/src/Admin/Pages/PendingChangesPage.php' );
+ok( 'the screen repairs the table when it renders', false !== strpos( $pending_page, 'collapse_duplicates()' ) );
+// Before verification, or a stale duplicate would be probed against Production and
+// offered for pushing alongside the row that supersedes it.
+$collapse_at = strpos( $pending_page, 'collapse_duplicates()' );
+$verify_at   = strpos( $pending_page, '$this->verify(' );
+ok( 'and repairs BEFORE anything reads the rows', false !== $collapse_at && false !== $verify_at && $collapse_at < $verify_at );
+ok( 'rows never vanish without a word', false !== strpos( $pending_page, 'was merged into it' ) );
+
+// Identical titles are not a duplicate. WordPress names an attachment after its file, so
+// uploading test.png repeatedly yields several attachments all called "test" — eight of
+// those read as one item tracked eight times unless the object id is on screen.
+ok( 'each row shows the object id', false !== strpos( $pending_page, '(int) $item->object_id' ) );
+ok( 'rendered in the Object cell', (bool) preg_match( '/<strong>%2\$s<\/strong><span class="dp-id">#%10\$d<\/span>/', $pending_page ) );
+
 echo "\n=== option ids are wide enough to stop merging rows ===\n";
 
 $id = OptionExporter::option_id( 'options_hero_title' );

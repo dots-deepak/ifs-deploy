@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace IfsDeploy\Client;
 
 use IfsDeploy\Auth\Credentials;
+use IfsDeploy\Export\MediaExporter;
 use IfsDeploy\Export\PostExporter;
 use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Rest\ObjectEndpoint;
@@ -28,16 +29,19 @@ final class PreviewService {
 
 	private QueueRepository $queue;
 	private PostExporter $exporter;
+	private MediaExporter $media_exporter;
 	private DeployClient $client;
 
 	public function __construct(
 		?QueueRepository $queue = null,
 		?PostExporter $exporter = null,
-		?DeployClient $client = null
+		?DeployClient $client = null,
+		?MediaExporter $media_exporter = null
 	) {
-		$this->queue    = $queue ?? new QueueRepository();
-		$this->exporter = $exporter ?? new PostExporter();
-		$this->client   = $client ?? new DeployClient();
+		$this->queue          = $queue ?? new QueueRepository();
+		$this->exporter       = $exporter ?? new PostExporter();
+		$this->client         = $client ?? new DeployClient();
+		$this->media_exporter = $media_exporter ?? new MediaExporter();
 	}
 
 	/**
@@ -51,15 +55,19 @@ final class PreviewService {
 			return $this->fail( __( 'That pending change no longer exists. Refresh the page.', 'ifs-deploy' ) );
 		}
 
-		if ( 'post' !== (string) $item->object_type ) {
-			return $this->fail( __( 'Preview is available for pages, posts and custom post types. This item still deploys normally.', 'ifs-deploy' ) );
+		$type = (string) $item->object_type;
+
+		if ( ! in_array( $type, array( 'post', 'media' ), true ) ) {
+			return $this->fail( __( 'Preview is available for pages, posts, custom post types and media. This item still deploys normally.', 'ifs-deploy' ) );
 		}
 
 		if ( 'delete' === (string) $item->action ) {
 			return $this->preview_delete( $item );
 		}
 
-		$preview = $this->preview_post( (int) $item->object_id );
+		$preview = 'media' === $type
+			? $this->preview_media( (int) $item->object_id )
+			: $this->preview_post( (int) $item->object_id );
 
 		// The dialog just proved there is nothing to deploy, so act on it rather than
 		// leaving the row in Pending Changes contradicting its own preview. Only when
@@ -128,6 +136,70 @@ final class PreviewService {
 			'prod_id'  => $found ? (int) ( $remote['prod_id'] ?? 0 ) : 0,
 			'strategy' => $found ? (string) ( $remote['strategy'] ?? 'none' ) : 'none',
 			'fields'   => PackageDiff::compare( $package, $prod_package ),
+		);
+	}
+
+	/**
+	 * Preview what pushing a media item would change on Production.
+	 *
+	 * Same shape and same rules as preview_post(), so `Admin\DiffRenderer` needs no
+	 * special case — a media row's dialog is built by exactly the code that builds a
+	 * page's. What differs is only the package: both sides are built by the same
+	 * `MediaExporter`, so any difference reported is a real one rather than an artefact
+	 * of two different serializations.
+	 *
+	 * No URL neutralising here. A media package's only URL is `source_url`, which is
+	 * excluded from the comparison outright (it carries the domain, so it differs on
+	 * every object), and attachment meta does not hold the environment links that ACF
+	 * puts in a post's.
+	 *
+	 * @return array See preview_post() for the shape.
+	 */
+	public function preview_media( int $attachment_id ): array {
+		if ( ! Config::is_staging() ) {
+			return $this->fail( __( 'Previews run from the Staging site.', 'ifs-deploy' ) );
+		}
+
+		$package = $this->media_exporter->export( $attachment_id );
+		if ( null === $package ) {
+			return $this->fail( __( 'This media item no longer exists on Staging, so there is nothing to preview.', 'ifs-deploy' ) );
+		}
+
+		$remote = $this->fetch_remote( $this->probe_from_media_package( $package ) );
+		if ( isset( $remote['error'] ) ) {
+			return $this->fail( (string) $remote['error'] );
+		}
+
+		$prod_package = is_array( $remote['object'] ?? null ) ? $remote['object'] : null;
+		$found        = ( null !== $prod_package );
+
+		return array(
+			'ok'       => true,
+			'title'    => (string) ( $package['attachment']['post_title'] ?? '' ),
+			'subtype'  => (string) ( $package['subtype'] ?? '' ),
+			'action'   => 'update',
+			'found'    => $found,
+			'prod_id'  => $found ? (int) ( $remote['prod_id'] ?? 0 ) : 0,
+			'strategy' => $found ? (string) ( $remote['strategy'] ?? 'none' ) : 'none',
+			'fields'   => PackageDiff::compare( $package, $prod_package ),
+		);
+	}
+
+	/**
+	 * How Production is asked to find its copy of an attachment.
+	 *
+	 * Carries exactly what `MediaImporter::find_existing()` needs, and nothing else, so
+	 * the preview resolves the same attachment a real push would update: the recorded
+	 * source URL first, then the origin link, then id parity — and that last one only
+	 * when the filename corroborates it.
+	 */
+	private function probe_from_media_package( array $package ): array {
+		return array(
+			'type'        => 'media',
+			'origin_id'   => (int) ( $package['origin_id'] ?? 0 ),
+			'origin_site' => (string) ( $package['origin_site'] ?? '' ),
+			'source_url'  => (string) ( $package['source_url'] ?? '' ),
+			'filename'    => (string) ( $package['filename'] ?? '' ),
 		);
 	}
 
@@ -211,6 +283,19 @@ final class PreviewService {
 	 */
 	private function probe_from_queue_item( object $item ): array {
 		$post = get_post( (int) $item->object_id );
+
+		// A deleted attachment is looked up the way attachments are looked up. Its file
+		// is usually gone by now, so only the origin link can resolve it — which is
+		// exactly what MediaImporter tries first after the source URL.
+		if ( 'media' === (string) $item->object_type ) {
+			return array(
+				'type'        => 'media',
+				'origin_id'   => (int) $item->object_id,
+				'origin_site' => (string) Credentials::get()['site_id'],
+				'source_url'  => '',
+				'filename'    => '',
+			);
+		}
 
 		return array(
 			'origin_id'   => (int) $item->object_id,

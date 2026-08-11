@@ -213,18 +213,83 @@ final class QueueRepository {
 
 		$table = Schema::queue_table();
 
+		/*
+		 * ONE ROW PER OBJECT, guaranteed at READ time as well as at write time.
+		 *
+		 * `find()` already keys an object by (object_type, object_id), so nothing written
+		 * through this class can duplicate one. This is the belt to that pair of braces:
+		 * rows predating the v7 migration, a row inserted by an older build, or anything
+		 * that reaches the table another way must still never show the same object twice.
+		 * A list that does is not merely untidy — with several people working at once it
+		 * makes "what am I about to push?" unanswerable.
+		 *
+		 * The subquery picks the HIGHEST id per object, which is the most recent state:
+		 * rows are updated in place, so a duplicate is always the later insert.
+		 *
+		 * STATUS IS NOT PART OF THE SUBQUERY, deliberately. The invariant is one row per
+		 * object outright — that is also what the UNIQUE key enforces, and it spans every
+		 * status. Scoping the subquery per status would let a stale `pending` row show
+		 * alongside the `deployed` row that superseded it, which is the confusion this
+		 * whole rule exists to remove.
+		 */
 		if ( null === $user_id ) {
 			return (array) $wpdb->get_results(
-				$wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s ORDER BY updated_at DESC", $status ) // phpcs:ignore WordPress.DB.PreparedSQL
+				$wpdb->prepare(
+					// phpcs:ignore WordPress.DB.PreparedSQL
+					"SELECT q.* FROM {$table} q
+					 WHERE q.status = %s
+					   AND q.id = (
+					       SELECT MAX(d.id) FROM {$table} d
+					       WHERE d.object_type = q.object_type
+					         AND d.object_id = q.object_id
+					   )
+					 ORDER BY q.updated_at DESC",
+					$status
+				)
 			);
 		}
 
 		return (array) $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT * FROM {$table} WHERE status = %s AND user_id = %d ORDER BY updated_at DESC", // phpcs:ignore WordPress.DB.PreparedSQL
+				// phpcs:ignore WordPress.DB.PreparedSQL
+				"SELECT q.* FROM {$table} q
+				 WHERE q.status = %s AND q.user_id = %d
+				   AND q.id = (
+				       SELECT MAX(d.id) FROM {$table} d
+				       WHERE d.object_type = q.object_type
+				         AND d.object_id = q.object_id
+				   )
+				 ORDER BY q.updated_at DESC",
 				$status,
 				$user_id
 			)
+		);
+	}
+
+	/**
+	 * Physically remove any duplicate rows for one object, keeping the newest.
+	 *
+	 * `get_by_status()` already hides them, but hiding is not the same as fixing: a
+	 * hidden row still counts in `users_with_status()`, still sits behind the UNIQUE key,
+	 * and would reappear the moment a query forgot the subquery. This runs when Pending
+	 * Changes is rendered, so the table repairs itself in the course of ordinary use
+	 * rather than only at the one moment an upgrade happens to fire.
+	 *
+	 * @return int Rows removed.
+	 */
+	public function collapse_duplicates(): int {
+		global $wpdb;
+
+		$table = Schema::queue_table();
+
+		// Across every status, matching both the UNIQUE key and get_by_status(): one row
+		// per object, and the newest is the truth.
+		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
+			"DELETE older FROM {$table} AS older
+			 INNER JOIN {$table} AS newer
+			     ON older.object_type = newer.object_type
+			    AND older.object_id   = newer.object_id
+			    AND older.id          < newer.id"
 		);
 	}
 
@@ -305,6 +370,105 @@ final class QueueRepository {
 				current_time( 'mysql' ),
 				$id
 			)
+		);
+	}
+
+	/**
+	 * Drop an object's row entirely.
+	 *
+	 * Used when an object turns out not to be independently deployable after all — the
+	 * case being several attachment records that share one file, where only the original
+	 * is tracked. Deleting rather than marking a status: the row describes something that
+	 * should never have had one, so leaving it behind under any status would still put it
+	 * in front of someone.
+	 */
+	public function forget( string $type, int $object_id ): void {
+		global $wpdb;
+
+		$wpdb->delete(
+			Schema::queue_table(),
+			array(
+				'object_type' => $type,
+				'object_id'   => $object_id,
+			),
+			array( '%s', '%d' )
+		);
+	}
+
+	/**
+	 * Leave one pending media row per FILE, keeping the lowest attachment id.
+	 *
+	 * The counterpart to `AttachmentObserver`'s rule, for rows already written before it
+	 * existed. Those attachments may never be saved again, so nothing would otherwise
+	 * ever clean them up.
+	 *
+	 * Why by file: `MediaImporter::find_existing()` matches an incoming attachment on its
+	 * recorded source URL, and attachments sharing a file share a source URL — so a push
+	 * of all of them yields exactly ONE attachment on Production. Listing them separately
+	 * promises an outcome that cannot happen.
+	 *
+	 * @return int Rows removed.
+	 */
+	public function collapse_media_by_file(): int {
+		global $wpdb;
+
+		$table = Schema::queue_table();
+
+		$rows = (array) $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, object_id FROM {$table} WHERE object_type = 'media' AND status = %s", // phpcs:ignore WordPress.DB.PreparedSQL
+				self::STATUS_PENDING
+			)
+		);
+
+		if ( count( $rows ) < 2 ) {
+			return 0;
+		}
+
+		// One query for every attachment's meta rather than one per row.
+		update_meta_cache( 'post', array_map( static fn( $row ): int => (int) $row->object_id, $rows ) );
+
+		$best = array();  // file => [ 'object_id' => int, 'row_ids' => int[] ]
+
+		foreach ( $rows as $row ) {
+			$file = (string) get_post_meta( (int) $row->object_id, '_wp_attached_file', true );
+
+			// An attachment whose file is unknown is left strictly alone: with nothing to
+			// group on, "duplicate" cannot be established, and this must never guess.
+			if ( '' === $file ) {
+				continue;
+			}
+
+			if ( ! isset( $best[ $file ] ) ) {
+				$best[ $file ] = array( 'object_id' => (int) $row->object_id, 'row_ids' => array() );
+			}
+
+			$best[ $file ]['object_id'] = min( $best[ $file ]['object_id'], (int) $row->object_id );
+			$best[ $file ]['row_ids'][] = (int) $row->id;
+		}
+
+		$remove = array();
+
+		foreach ( $best as $file => $group ) {
+			if ( count( $group['row_ids'] ) < 2 ) {
+				continue;
+			}
+
+			foreach ( $rows as $row ) {
+				if ( in_array( (int) $row->id, $group['row_ids'], true ) && (int) $row->object_id !== $group['object_id'] ) {
+					$remove[] = (int) $row->id;
+				}
+			}
+		}
+
+		if ( empty( $remove ) ) {
+			return 0;
+		}
+
+		$placeholders = implode( ',', array_fill( 0, count( $remove ), '%d' ) );
+
+		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
+			$wpdb->prepare( "DELETE FROM {$table} WHERE id IN ({$placeholders})", $remove ) // phpcs:ignore WordPress.DB.PreparedSQL
 		);
 	}
 

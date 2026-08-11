@@ -90,17 +90,84 @@ final class Schema {
 	 * A plain DELETE with a self-join: this runs once, and the row count is the number
 	 * of pending changes on a site, not a table scan worth worrying about.
 	 */
-	private static function collapse_duplicate_rows(): void {
+	private static function collapse_duplicate_rows(): int {
 		global $wpdb;
 
 		$table = self::queue_table();
 
-		$wpdb->query( // phpcs:ignore WordPress.DB
+		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
 			"DELETE older FROM {$table} AS older
 			 INNER JOIN {$table} AS newer
 			     ON older.object_type = newer.object_type
 			    AND older.object_id   = newer.object_id
 			    AND older.id          < newer.id"
+		);
+	}
+
+	/**
+	 * Make sure the queue's UNIQUE key actually EXISTS, and rebuild it if it does not.
+	 *
+	 * ── WHY THIS IS NOT PARANOIA ───────────────────────────────────────────────────
+	 *
+	 * The key is what stops two concurrent saves of one object both writing a row.
+	 * `upsert()` reads then writes, and those are two statements: two requests can both
+	 * find nothing and both insert. The UNIQUE index is the only thing that makes the
+	 * second one fail — exactly the same reasoning as `Auth\NonceStore`.
+	 *
+	 * `dbDelta()` declares the key in CREATE TABLE, but dbDelta is unreliable at ADDING
+	 * an index to a table that already exists, and it reports nothing when it does not.
+	 * A site was found with EIGHT queue rows for a single attachment, created within the
+	 * same second — the signature of concurrent inserts against a table with no unique
+	 * key at all.
+	 *
+	 * Order matters: MySQL REFUSES to add a unique index while duplicate rows exist, so
+	 * the duplicates have to go first. That is also why the missing key is
+	 * self-perpetuating — once duplicates are in, no later dbDelta can ever add it back.
+	 *
+	 * Failure here is logged, never fatal. `QueueRepository` no longer depends on the
+	 * index for correctness (it identifies a row by type + object id, dedupes on read
+	 * and collapses duplicates), so a database that refuses the index degrades to
+	 * "correct, but without the concurrency backstop" rather than breaking.
+	 */
+	private static function ensure_object_identity_index(): void {
+		global $wpdb;
+
+		$table = self::queue_table();
+
+		// SHOW INDEX rather than information_schema: no extra grant needed, and it is
+		// answered from the table's own metadata.
+		$existing = $wpdb->get_results( "SHOW INDEX FROM {$table} WHERE Key_name = 'object_identity'" ); // phpcs:ignore WordPress.DB
+
+		if ( ! empty( $existing ) ) {
+			return;
+		}
+
+		$removed = self::collapse_duplicate_rows();
+
+		// Suppress the error the ALTER would otherwise print: on a database that will not
+		// take the index this is a degradation to report, not a screen full of SQL.
+		$quiet = $wpdb->suppress_errors( true );
+		$added = $wpdb->query( "ALTER TABLE {$table} ADD UNIQUE KEY object_identity (object_type,object_subtype,object_id)" ); // phpcs:ignore WordPress.DB
+		$wpdb->suppress_errors( $quiet );
+
+		if ( false === $added ) {
+			DebugLog::error(
+				'The queue table has no UNIQUE key and it could not be created. Duplicate pending changes are possible; they are merged when the screen is viewed.',
+				array(
+					'table' => $table,
+					'error' => (string) $wpdb->last_error,
+				)
+			);
+
+			return;
+		}
+
+		DebugLog::warning(
+			'The queue table was missing its UNIQUE key and it has been rebuilt.',
+			array(
+				'table'              => $table,
+				'duplicates_removed' => $removed,
+			)
 		);
 	}
 
@@ -272,6 +339,16 @@ final class Schema {
 				KEY outcome (outcome)
 			) {$charset_collate};"
 		);
+
+		/*
+		 * LAST, and after every dbDelta above.
+		 *
+		 * dbDelta declares the queue's UNIQUE key but cannot be trusted to have created
+		 * it on a table that already existed — and without it two concurrent saves of one
+		 * object both insert. Verified explicitly rather than assumed. Runs on activation
+		 * and on every schema upgrade, so re-activating the plugin repairs it.
+		 */
+		self::ensure_object_identity_index();
 	}
 
 	public static function queue_table(): string {

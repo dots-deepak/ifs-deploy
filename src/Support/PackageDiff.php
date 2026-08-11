@@ -88,6 +88,13 @@ final class PackageDiff {
 	public static function compare( array $staging, ?array $prod, bool $full_replace = false ): array {
 		self::$full_replace = $full_replace;
 
+		// A media package has no post_content, no taxonomies and no featured image; it
+		// has attachment fields and alt text. Comparing it against the post shape below
+		// would report every one of its real differences as nothing at all.
+		if ( 'media' === (string) ( $staging['type'] ?? 'post' ) ) {
+			return self::media_package_fields( $staging, $prod );
+		}
+
 		$fields = array();
 
 		$staging_object = (array) ( $staging['object'] ?? array() );
@@ -241,6 +248,84 @@ final class PackageDiff {
 		}
 
 		return $fields;
+	}
+
+	/**
+	 * The attachment fields worth showing, in display order.
+	 *
+	 * `post_parent` is excluded because it is a raw post id that legitimately differs
+	 * across sites, and `post_date` because it is the upload time. `post_name` IS
+	 * included: an attachment's slug is what its page URL uses, so a change to it is a
+	 * real, visible change.
+	 *
+	 * @var array<string,string>
+	 */
+	private const ATTACHMENT_FIELDS = array(
+		'post_title'     => 'Title',
+		'post_excerpt'   => 'Caption',
+		'post_content'   => 'Description',
+		'post_name'      => 'Slug',
+		'post_mime_type' => 'File type',
+		'menu_order'     => 'Order',
+	);
+
+	/**
+	 * Diff a media package: what a push would change about the attachment itself.
+	 *
+	 * Two things are deliberately NOT compared:
+	 *
+	 *  - `source_url`, which carries the site domain and so differs on every object.
+	 *  - the file's BINARY content. A deploy only transfers the file when Production
+	 *    does not already have it, so a diff cannot promise anything about the bytes.
+	 *
+	 * `filename` IS compared, but against the rename-proof name on both sides.
+	 * `wp_upload_bits()` never overwrites, so an incoming `hero.png` becomes
+	 * `hero-1.png` when Production already holds an unrelated `hero.png` — comparing
+	 * the local names would report a difference on every single push, over a suffix
+	 * Production added itself. `Rest\ObjectEndpoint` substitutes
+	 * `MediaIdentity::stable_filename()` before replying, which recovers the original
+	 * name from the source-URL stamp. Same reasoning as the featured image in §23.
+	 *
+	 * @return array<int,array>
+	 */
+	private static function media_package_fields( array $staging, ?array $prod ): array {
+		$fields = array();
+
+		// Alt text and filename sit at the top level of a media package, not inside
+		// `attachment` — alt because it is meta on the target, filename because it
+		// describes the file rather than the post row.
+		foreach ( array( 'alt' => 'Alt text', 'filename' => 'File name' ) as $key => $label ) {
+			$after  = self::stringify( $staging[ $key ] ?? null );
+			$before = null === $prod ? '' : self::stringify( $prod[ $key ] ?? null );
+
+			if ( $before !== $after ) {
+				$fields[] = self::field( $label, $key, self::GROUP_CORE, $before, $after );
+			}
+		}
+
+		$after_attachment  = (array) ( $staging['attachment'] ?? array() );
+		$before_attachment = null === $prod ? array() : (array) ( $prod['attachment'] ?? array() );
+
+		foreach ( self::ATTACHMENT_FIELDS as $key => $label ) {
+			$after  = self::stringify( $after_attachment[ $key ] ?? null );
+			$before = null === $prod ? '' : self::stringify( $before_attachment[ $key ] ?? null );
+
+			if ( $before === $after ) {
+				continue;
+			}
+
+			// Same rule as the post path: a zero against nothing is a default, not a
+			// change worth showing.
+			if ( '' === $before && '0' === $after ) {
+				continue;
+			}
+
+			$fields[] = self::field( $label, $key, self::GROUP_CORE, $before, $after );
+		}
+
+		// Attachment meta travels in the package exactly as a post's does, so the same
+		// comparison applies — including anything ACF stores against the attachment.
+		return array_merge( $fields, self::meta_fields( $staging, $prod ) );
 	}
 
 	/**

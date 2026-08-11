@@ -33,6 +33,8 @@ $suites = array(
 	'media-identity',
 	'media-match',
 	'media-url',
+	'mediadiff',
+	'mediatrack',
 	'meta',
 	'metablock',
 	'metadelete',

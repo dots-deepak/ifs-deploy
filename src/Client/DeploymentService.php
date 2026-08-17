@@ -288,6 +288,39 @@ final class DeploymentService {
 			$lock->note_owner( (string) $target['type'], (int) $target['id'], $user_id );
 		}
 
+		/*
+		 * THE HISTORY RECORD, opened on the first batch and reused by the rest.
+		 *
+		 * ── WHY THIS WAS MISSING ENTIRELY ──────────────────────────────────────────────
+		 *
+		 * `send()` — the single-request path behind Compare & Sync's per-row Push — creates
+		 * a deployment record. This one never did. So every push started from Pending
+		 * Changes, which is every push of media and the overwhelming majority of all
+		 * pushes, completed successfully and left NO trace in Deployment History.
+		 *
+		 * It also took rollback with it. The History screen offers Rollback from a
+		 * deployment row, and there was no row — so a batched push, however well it went,
+		 * could never be rolled back from this side.
+		 *
+		 * Batching is what made it invisible in review: the record used to be created by
+		 * the path the tests exercised, and the new path simply did not grow one.
+		 *
+		 * ── WHY BY UUID ────────────────────────────────────────────────────────────────
+		 *
+		 * Every batch of one push carries the same uuid, exactly as Production relies on in
+		 * `ImportManager::run()`. Looking the record up rather than creating one per request
+		 * is what keeps a fifty-item push ONE deployment instead of five — and it has to
+		 * match Production's grouping, or a rollback would ask that side to undo a
+		 * deployment it filed differently.
+		 */
+		$deployment = $this->deployments->get_by_uuid( $uuid );
+
+		$deployment_id = null !== $deployment
+			? (int) $deployment->id
+			: $this->deployments->create( $uuid, $user_id, DeploymentRepository::STATUS_PENDING );
+
+		$previous = null !== $deployment ? self::decode_log( $deployment ) : array();
+
 		try {
 			$response = $this->client->post(
 				'import',
@@ -298,9 +331,17 @@ final class DeploymentService {
 			);
 
 			if ( is_wp_error( $response ) ) {
+				$message = $this->transport_message( $response );
+
+				$this->deployments->update(
+					$deployment_id,
+					DeploymentRepository::STATUS_FAILED,
+					array_merge( $previous, array( array( 'ok' => false, 'error' => $message ) ) )
+				);
+
 				return array(
 					'ok'      => false,
-					'message' => $this->transport_message( $response ),
+					'message' => $message,
 					'uuid'    => $uuid,
 					'status'  => DeploymentRepository::STATUS_FAILED,
 					'results' => 0,
@@ -312,18 +353,36 @@ final class DeploymentService {
 
 			$this->apply_results( $results, $mapped );
 
-			$failed = false;
+			$batch_failed = false;
 
 			foreach ( $results as $result ) {
 				if ( empty( $result['ok'] ) ) {
-					$failed = true;
+					$batch_failed = true;
 					break;
 				}
 			}
 
+			/*
+			 * THE WHOLE PUSH SO FAR, not just this batch.
+			 *
+			 * Production sends back only the results for the objects in this request, so
+			 * writing them straight to the record would leave the History screen describing
+			 * the LAST batch and nothing else — a fifty-item push showing five objects.
+			 * They are appended to what earlier batches recorded, which is the same thing
+			 * Production does with its own copy.
+			 *
+			 * The status is recomputed over the merged set rather than taken from this
+			 * batch: a push whose first batch failed and whose second succeeded has not
+			 * succeeded, and `can_rollback()` reads this column to decide whether to offer
+			 * the button at all.
+			 */
+			$all = array_merge( $previous, array_values( $results ) );
+
+			$this->deployments->update( $deployment_id, self::status_for( $all ), $all );
+
 			return array(
-				'ok'        => 200 === $response['status'] && ! $failed,
-				'message'   => $failed ? $this->failure_message( $response, $results ) : '',
+				'ok'        => 200 === $response['status'] && ! $batch_failed,
+				'message'   => $batch_failed ? $this->failure_message( $response, $results ) : '',
 				'uuid'      => $uuid,
 				'status'    => (string) ( $body['status'] ?? DeploymentRepository::STATUS_PENDING ),
 				'results'   => count( $results ),
@@ -332,6 +391,48 @@ final class DeploymentService {
 		} finally {
 			$lock->release_all();
 		}
+	}
+
+	/**
+	 * The deployment log a record already holds, as an array.
+	 *
+	 * Anything unreadable is treated as empty rather than fatal: a corrupt log must not
+	 * stop the push that is currently running from recording what it did.
+	 */
+	private static function decode_log( object $deployment ): array {
+		$log = json_decode( (string) ( $deployment->deployment_log ?? '' ), true );
+
+		return is_array( $log ) ? $log : array();
+	}
+
+	/**
+	 * Overall status for a set of per-object results.
+	 *
+	 * PARTIAL is a real outcome and the reason this is not a boolean: some objects reached
+	 * Production and some did not, and both the History screen and rollback need to know
+	 * that rather than being told the push simply failed. The snapshots for whatever DID
+	 * land are real, so the deployment is still rollback-able.
+	 */
+	public static function status_for( array $results ): string {
+		if ( empty( $results ) ) {
+			return DeploymentRepository::STATUS_PENDING;
+		}
+
+		$ok = 0;
+
+		foreach ( $results as $result ) {
+			if ( ! empty( ( (array) $result )['ok'] ) ) {
+				++$ok;
+			}
+		}
+
+		if ( 0 === $ok ) {
+			return DeploymentRepository::STATUS_FAILED;
+		}
+
+		return $ok === count( $results )
+			? DeploymentRepository::STATUS_SUCCESS
+			: DeploymentRepository::STATUS_PARTIAL;
 	}
 
 	/**
@@ -583,6 +684,26 @@ final class DeploymentService {
 	 */
 	public function cancel( string $uuid, array $queue_ids ): array {
 		$response = $this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
+
+		/*
+		 * MARK IT CANCELLED HERE TOO, and do it whatever Production says.
+		 *
+		 * A batched push now opens a history record on this side, so a cancelled one would
+		 * otherwise be left sitting at `pending` or `partial` — which is precisely the
+		 * state `can_rollback()` offers a Rollback button for. That button would propose
+		 * undoing a deployment whose snapshots the cancel has already applied and deleted:
+		 * it would re-apply the very state the cancel just reverted.
+		 *
+		 * Unconditional on purpose. If Production could not be reached, this push is still
+		 * not something to offer a rollback of — the honest reading of an unknown remote
+		 * state is "do not offer to undo it again", and the message below already tells the
+		 * operator to check Production directly.
+		 */
+		$deployment = $this->deployments->get_by_uuid( $uuid );
+
+		if ( null !== $deployment ) {
+			$this->deployments->set_status( (int) $deployment->id, DeploymentRepository::STATUS_CANCELLED );
+		}
 
 		/*
 		 * The queue is restored EVEN IF the remote call failed.

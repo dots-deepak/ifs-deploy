@@ -875,6 +875,27 @@ body.ifs-deploy-modal-open {
 	@apply tw-mb-0;
 }
 
+/* The same aside, for something that destroys data. Tinted rather than shouted: the panel
+   has to be read, and a block of red is skimmed past. */
+.ifs-deploy .dp-note-danger {
+	background: #fcf3f2;
+	border-color: #f0c3c1;
+}
+
+/* A button whose action cannot be undone. Distinct from the primary button so it is never
+   pressed on the way to saving something. */
+.ifs-deploy .ifs-deploy-danger,
+.ifs-deploy .ifs-deploy-danger:hover,
+.ifs-deploy .ifs-deploy-danger:focus {
+	border-color: #d63638;
+	color: #d63638;
+}
+
+.ifs-deploy .ifs-deploy-danger:hover,
+.ifs-deploy .ifs-deploy-danger:focus {
+	background: #fcf3f2;
+}
+
 .ifs-deploy .dp-list {
 	@apply tw-my-2 tw-list-disc tw-pl-5 tw-text-sm tw-text-grey-600;
 }

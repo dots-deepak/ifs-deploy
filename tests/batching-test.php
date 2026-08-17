@@ -110,6 +110,134 @@ ok( 'not reused from rollback', 0 === preg_match( '/STATUS_CANCELLED\s*=\s*.roll
 // Cancelling before the first batch lands is the best outcome, not an error to interpret.
 ok( 'nothing-applied is a success, not a failure', (bool) preg_match( "/null === \\\$deployment.*?'ok' => true/s", $cancel ) );
 
+echo "\n=== a batched push RECORDS ITSELF in Deployment History ===\n";
+//
+// ── THE BUG THIS EXISTS TO CATCH ───────────────────────────────────────────────────
+//
+// `send()` — the single-request path behind Compare & Sync's per-row Push — creates a
+// deployment record. `deploy_batch()` never did. So every push started from Pending
+// Changes, which is every push of media and very nearly every push of anything, completed
+// and left NO trace in Deployment History.
+//
+// It took rollback with it: the History screen offers Rollback from a deployment row, and
+// there was no row. A batched push could not be rolled back from this side at all.
+/*
+ * SCOPED TO deploy_batch()'s OWN BODY.
+ *
+ * `send()` further down the same file creates and updates a deployment record too, so an
+ * unanchored search across the file passed whatever `deploy_batch()` did — which is exactly
+ * how the missing record survived review in the first place. Every assertion below reads
+ * only the slice between this method and the next one.
+ */
+// Bounded by the NEXT function declaration. `src()` runs php_strip_whitespace(), which
+// collapses the formatting — so the boundary has to be a token, not indentation.
+preg_match( '/function deploy_batch\(.*?(?=function [a-z_]+\()/s', $service, $slice );
+
+$batch_body = (string) ( $slice[0] ?? '' );
+
+ok( 'the deploy_batch body was isolated', '' !== $batch_body && false === strpos( $batch_body, 'function send(' ) );
+
+ok( 'the batch opens a deployment record', false !== strpos( $batch_body, 'deployments->create(' ) );
+ok( 'and updates it with the results', false !== strpos( $batch_body, 'deployments->update(' ) );
+
+// ONE deployment per push, not one per batch — the property the whole file is about.
+// Production groups by uuid in ImportManager::run(); this side has to agree, or a rollback
+// would ask that side to undo a deployment it filed differently.
+ok( 'it looks the record up by uuid first', false !== strpos( $batch_body, 'get_by_uuid( $uuid )' ) );
+ok( 'creating one only when there is none', (bool) preg_match( '/null !== \$deployment\s*\?\s*\(int\) \$deployment->id\s*:\s*\$this->deployments->create\(/', $batch_body ) );
+
+// Each batch returns only its own results, so writing them straight over the record would
+// leave History describing the last batch and nothing else.
+ok( 'later batches append rather than replace', false !== strpos( $batch_body, 'array_merge( $previous' ) );
+
+// A transport failure has to be recorded too, or a push that never arrived looks like one
+// that never happened.
+ok( 'a failed batch is written to the record as well', (bool) preg_match( '/is_wp_error\( \$response \).*?deployments->update\(/s', $batch_body ) );
+
+echo "\n=== and the status describes the WHOLE push ===\n";
+//
+// Recomputed over every batch's results, not taken from the last one: a push whose first
+// batch failed and whose second succeeded has not succeeded, and can_rollback() reads this
+// column to decide whether to offer the button.
+require_once dirname( __DIR__ ) . '/src/History/DeploymentRepository.php';
+require_once dirname( __DIR__ ) . '/src/Client/DeploymentService.php';
+
+use IfsDeploy\Client\DeploymentService;
+use IfsDeploy\History\DeploymentRepository;
+
+$ok_result  = array( 'ok' => true );
+$bad_result = array( 'ok' => false );
+
+ok( 'all succeeded is a success', DeploymentRepository::STATUS_SUCCESS === DeploymentService::status_for( array( $ok_result, $ok_result ) ) );
+ok( 'all failed is a failure', DeploymentRepository::STATUS_FAILED === DeploymentService::status_for( array( $bad_result, $bad_result ) ) );
+ok( 'a mixture is PARTIAL', DeploymentRepository::STATUS_PARTIAL === DeploymentService::status_for( array( $ok_result, $bad_result ) ) );
+ok( 'and order does not change that', DeploymentRepository::STATUS_PARTIAL === DeploymentService::status_for( array( $bad_result, $ok_result ) ) );
+ok( 'nothing yet is still pending', DeploymentRepository::STATUS_PENDING === DeploymentService::status_for( array() ) );
+
+/*
+ * PARTIAL is deliberately not FAILED. Some objects reached Production and their snapshots
+ * are real, so the deployment is still rollback-able — and HistoryPage::can_rollback()
+ * refuses FAILED outright, so calling it that would strand the half that did land.
+ */
+$history = src( 'src/Admin/Pages/HistoryPage.php' );
+
+// Checked against the EXCLUSION LIST specifically. `STATUS_PARTIAL` also appears in the
+// status-badge map, so searching the whole file would pass whatever can_rollback() did.
+preg_match( '/function can_rollback\(.*?in_array\(\s*\$status,\s*array\((.*?)\)/s', $history, $refused );
+
+$refused_statuses = (string) ( $refused[1] ?? '' );
+
+ok( 'the rollback refusal list was found', '' !== $refused_statuses );
+ok( 'a partial push can still be rolled back', false === strpos( $refused_statuses, 'STATUS_PARTIAL' ) );
+ok( 'while a failed one cannot', false !== strpos( $refused_statuses, 'STATUS_FAILED' ) );
+ok( 'nor a cancelled one', false !== strpos( $refused_statuses, 'STATUS_CANCELLED' ) );
+
+echo "\n=== Reset All Plugin Data clears state and NEVER content ===\n";
+//
+// The one thing this feature must not be mistaken for is something that deletes pages.
+// "Reset all data" is a sentence people read as including their content, so the guarantee
+// is asserted here rather than only promised in the copy.
+$reset = src( 'src/Support/DataReset.php' );
+
+foreach ( array( 'queue_table', 'deployments_table', 'revisions_table', 'api_log_table', 'api_addresses_table', 'nonces_table' ) as $table ) {
+	ok( "it empties the {$table}", false !== strpos( $reset, $table . '()' ) );
+}
+
+// DELETE, not DROP. The plugin is still running and the very next page load writes to these.
+ok( 'the tables survive, only their rows go', false === stripos( $reset, 'DROP TABLE' ) );
+
+/*
+ * The stamps are the half a reset is usually actually after: without removing them, every
+ * object this site has deployed still says so, and the next push updates the far copy
+ * instead of behaving like the first push it is meant to be.
+ */
+foreach ( array( '_ifs_deploy_origin_id', '_ifs_deploy_origin_site', '_ifs_deploy_source_url', '_ifs_deploy_src_sig' ) as $key ) {
+	ok( "the {$key} stamp is removed", false !== strpos( $reset, $key ) );
+}
+
+ok( 'from posts', false !== strpos( $reset, 'wpdb->postmeta' ) );
+ok( 'and from terms', false !== strpos( $reset, 'wpdb->termmeta' ) );
+
+// NOTHING may touch the content tables themselves.
+ok( 'it never deletes posts', false === strpos( $reset, 'wpdb->posts,' ) && false === strpos( $reset, 'wp_delete_post' ) );
+ok( 'nor attachments', false === strpos( $reset, 'wp_delete_attachment' ) );
+ok( 'nor terms', false === strpos( $reset, 'wp_delete_term' ) );
+ok( 'nor options wholesale', 0 === preg_match( '/DELETE FROM \{\$wpdb->options\}(?!.*option_name LIKE)/s', $reset ) );
+
+// The connection is kept unless asked for: re-pairing two sites by hand is a far bigger
+// interruption than the reset is meant to be.
+ok( 'the connection is kept by default', (bool) preg_match( '/if \( \$include_connection \)/', $reset ) );
+ok( 'credentials only go when asked', (bool) preg_match( "/CONNECTION_OPTIONS = array\(\s*'ifs_deploy_credentials'/", $reset ) );
+
+// Admin-only. Someone who may push content is not thereby someone who may erase every
+// restore point on the site.
+$ajax = src( 'src/Admin/Ajax.php' );
+ok( 'only an administrator may run it', (bool) preg_match( '/function reset_data\(\).*?guard\( Access::CAP_MANAGE \)/s', $ajax ) );
+
+// A reset that left no trace of itself would make the next report of "everything
+// disappeared" impossible to explain.
+ok( 'and it records that it happened', false !== strpos( $reset, 'All IFS Deploy data on this site was reset' ) );
+
 echo "\n=== cancelling does NOT throw the work away ===\n";
 //
 // A cancel is a decision not to publish yet — not a decision to discard what was queued.

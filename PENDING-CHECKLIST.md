@@ -14,8 +14,8 @@ verified**, and "the code is written" is not verification. Two ticks exist on pu
 > existed, because the tests stubbed the same hook the code listened to. What found it was
 > someone saying how their site actually behaves.
 
-Last updated: 14 August 2026 · Built and ready to test: **0.11.1** · DB v9 ·
-1973 assertions green
+Last updated: 17 August 2026 · Built and ready to test: **0.12.1** · DB v10 ·
+2054 assertions green
 
 ---
 
@@ -34,8 +34,12 @@ rather than an investigation. **When something does not match, send the message 
 and the Logs & Diagnostics entries** — the plugin now names its own failures, so the report
 is usually enough to find the cause without a second round trip.
 
-**The build is ready:** `ifs-deploy-0.11.1.zip`. Install it on **both** sites before
+**The build is ready:** `ifs-deploy-0.12.1.zip`. Install it on **both** sites before
 starting — several of these are decided on the receiving side.
+
+**Reset All Plugin Data** (Settings → Log Retention) clears this site's pending changes,
+history, restore points, logs and deployment stamps, so a test can be repeated from nothing.
+Run it on BOTH sites for a genuinely clean pair; it never touches content.
 
 ### 🟠 If a media removal still does not reach Production
 
@@ -92,6 +96,12 @@ tells you nothing, and if pushing is broken, a rollback test cannot be interpret
       Trash on Staging and push it. *Expect:* it is in Production's **Media → Trash**, not
       gone. Then permanently delete it on Staging and push again — *expect it destroyed on
       Production*, and **not** reported as "nothing matched".
+- [x] Code · [ ] Verified — **11. Deployment History records the push.** Push anything from
+      Pending Changes. *Expect:* a row in Deployment History naming the objects, with status
+      **Success** (or **Partial** if some failed) and a **Rollback** button. Press Rollback
+      and check it reverts on Production. Neither the row nor the button has ever appeared
+      for a push made from this screen, so test both together. A push large enough to be
+      split into batches must still produce **one** row, not several.
 - [x] Code · [ ] Verified — **10. Media ID conflict.** Upload a new image on Staging whose
       ID is already taken on Production, and push it. *Expect:* the push stops with the
       **Media ID mismatch** dialog naming the ID and what is occupying it — no file is
@@ -217,9 +227,9 @@ status flagged `exclude_from_search`, which is exactly what trash is.
 
 ## 🔵 Blocking the verification above
 
-- [x] ~~Build 0.10.0 / 0.11.0~~ — superseded by 0.11.1, which is the one to test.
-- [x] **Build the release zip** — `ifs-deploy-0.11.1.zip`, 99 files, 418 KB. DB stays at 9,
-      so nothing migrates and it can be installed straight over the top.
+- [x] ~~Builds 0.10.0 – 0.12.0~~ — superseded by 0.12.1, which is the one to test.
+- [x] **Build the release zip** — `ifs-deploy-0.12.1.zip`, 101 files, 432 KB. DB is at 10;
+      the upgrade from 9 runs itself on first load and adds one queue column.
 - [ ] **Install it on BOTH sites.** Two reasons now: `/cancel` (new in 0.9.0) and
       `/id-space` (new in this build) are REST routes, so an older Production answers 404
       to them — the cancel test and the "Generate new ID" button would both fail for that

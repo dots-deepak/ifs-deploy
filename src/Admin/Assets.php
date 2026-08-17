@@ -52,6 +52,10 @@ final class Assets {
 					'confirmClear'          => __( 'Clear all deployment history? This cannot be undone. Snapshots already created on Production are not affected.', 'ifs-deploy' ),
 					'confirmClearTitle'     => __( 'Clear deployment history', 'ifs-deploy' ),
 					'confirmClearButton'    => __( 'Clear History', 'ifs-deploy' ),
+					'confirmResetTitle'     => __( 'Reset all plugin data', 'ifs-deploy' ),
+					'confirmReset'          => __( 'This deletes every pending change, the whole deployment history, every rollback restore point, both logs, and the deployment stamps on your content — on this site only. No page, post, image or setting of your site is touched. This cannot be undone: the restore points a rollback would need are part of what is being removed.', 'ifs-deploy' ),
+					'confirmResetConnection' => __( 'The connection settings will be removed as well, so this site will no longer be paired. You will need to regenerate credentials and enter them again on both sites.', 'ifs-deploy' ),
+					'confirmResetButton'    => __( 'Reset All Data', 'ifs-deploy' ),
 					'confirmBlockIpTitle'   => __( 'Block this address', 'ifs-deploy' ),
 					/* translators: %s: IP address */
 					'confirmBlockIp'        => __( 'Refuse every API request from %s from now on? If this is your own Staging site, deploys will stop working immediately.', 'ifs-deploy' ),

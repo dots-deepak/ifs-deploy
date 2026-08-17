@@ -13,6 +13,7 @@ use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Support\Access;
 use IfsDeploy\Support\ApiLog;
 use IfsDeploy\Support\Config;
+use IfsDeploy\Support\DataReset;
 use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\IpAccess;
 
@@ -37,6 +38,7 @@ final class Ajax {
 		add_action( 'wp_ajax_ifs_deploy_media_id_inspect', array( $this, 'media_id_inspect' ) );
 		add_action( 'wp_ajax_ifs_deploy_media_id_renumber', array( $this, 'media_id_renumber' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_history', array( $this, 'clear_history' ) );
+		add_action( 'wp_ajax_ifs_deploy_reset_data', array( $this, 'reset_data' ) );
 		add_action( 'wp_ajax_ifs_deploy_preview', array( $this, 'preview' ) );
 		add_action( 'wp_ajax_ifs_deploy_diagnostics', array( $this, 'diagnostics' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_log', array( $this, 'clear_log' ) );
@@ -529,6 +531,27 @@ final class Ajax {
 		}
 
 		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
+	/**
+	 * Wipe this site's IFS Deploy state so testing can start from nothing.
+	 *
+	 * ADMINISTRATORS ONLY — `CAP_MANAGE`, not the deploy capability. Someone who may push
+	 * content is not thereby someone who may erase every restore point on the site, and
+	 * this removes exactly the records a rollback depends on.
+	 */
+	public function reset_data(): void {
+		$this->guard( Access::CAP_MANAGE );
+
+		$include_connection = ! empty( $_POST['include_connection'] );
+
+		$counts = DataReset::run( $include_connection );
+
+		wp_send_json_success(
+			array(
+				'message' => DataReset::summarise( $counts, $include_connection ),
+			)
+		);
 	}
 
 	public function clear_history(): void {

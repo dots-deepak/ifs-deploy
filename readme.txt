@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.12.0
+Stable tag: 0.12.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,29 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.12.1 =
+Pushes are recorded in Deployment History again, and there is a way to clear the plugin's
+data without uninstalling it.
+
+* **A push now appears in Deployment History.** Pushing from Pending Changes recorded
+  nothing at all — only the per-row Push on the Compare screen ever created a history entry.
+  Since that is where almost everything is pushed from, the screen stayed empty however much
+  was deployed. Rollback went with it: the Rollback button is offered from a history row, and
+  there was no row, so a push made this way could never be undone from the Staging side.
+  A push split into several batches is recorded as ONE deployment, not one per batch.
+* **A push that partly failed says so.** The status is worked out across the whole push
+  rather than taken from its last batch, so a deployment where some objects landed and others
+  did not is reported as Partial — and stays rollback-able, because the restore points for
+  the objects that did land are real.
+* **Cancelling marks the deployment cancelled** on this side too, instead of leaving it
+  offering a Rollback button that would re-apply exactly what the cancel had just undone.
+* **New: Reset All Plugin Data**, under Settings → Log Retention. Clears every pending
+  change, the deployment history, all restore points, both logs, and the deployment stamps
+  on your content — which is what makes the next push behave like a first push, and what
+  made repeat testing impossible before. No page, post, image, category or setting of your
+  site is touched. It applies to this site only, and the connection is kept unless you ask
+  for it to go. Administrators only.
 
 = 0.12.0 =
 The Pending Changes list now says what you actually did, plugin archives stay out of it for
@@ -381,6 +404,11 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.12.1 =
+Pushes are recorded in Deployment History again, which also restores the Rollback button for
+them. Adds Reset All Plugin Data for testing. No database upgrade. Update both sites
+together.
 
 = 0.12.0 =
 The Action column now names the real action, plugin ZIPs stay out of Pending Changes, and

@@ -188,6 +188,9 @@
 		'ifs_deploy_rollback',
 		'ifs_deploy_sync_ids',
 		'ifs_deploy_clear_history',
+		// A reset empties the screen it was pressed on. Without the reload the page goes on
+		// listing rows that no longer exist.
+		'ifs_deploy_reset_data',
 		'ifs_deploy_clear_log'
 	];
 
@@ -1195,6 +1198,36 @@
 				danger: true,
 				onConfirm: function () {
 					request( 'ifs_deploy_clear_history', {}, $btn );
+				}
+			} );
+		} );
+
+		/*
+		 * Settings — reset all plugin data.
+		 *
+		 * The confirm text is built HERE rather than being a fixed string, because whether
+		 * the connection goes with it depends on a checkbox the user has just set. A dialog
+		 * that listed the wrong consequences would be worse than no dialog: this is the most
+		 * destructive thing in the plugin, and it is the only one that cannot be undone by a
+		 * rollback — it deletes the restore points a rollback would need.
+		 */
+		$( document ).on( 'click', '#ifs-deploy-reset-data', function () {
+			var $btn = $( this );
+			var includeConnection = $( '#reset_include_connection' ).is( ':checked' );
+
+			var text = IfsDeploy.i18n.confirmReset;
+
+			if ( includeConnection ) {
+				text += '\n\n' + IfsDeploy.i18n.confirmResetConnection;
+			}
+
+			openConfirm( {
+				title: IfsDeploy.i18n.confirmResetTitle,
+				text: text,
+				confirmLabel: IfsDeploy.i18n.confirmResetButton,
+				danger: true,
+				onConfirm: function () {
+					request( 'ifs_deploy_reset_data', { include_connection: includeConnection ? 1 : 0 }, $btn );
 				}
 			} );
 		} );

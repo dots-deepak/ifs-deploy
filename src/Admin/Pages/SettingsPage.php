@@ -224,6 +224,78 @@ final class SettingsPage {
 
 		echo '</div>';
 		echo '</form>';
+
+		$this->reset_data();
+	}
+
+	/**
+	 * Start again from nothing, for testing.
+	 *
+	 * ── WHY THIS IS HERE AND WHY IT LOOKS LIKE THIS ────────────────────────────────
+	 *
+	 * The plugin remembers what it has deployed — that is the point of it — and there was
+	 * no way to make it forget short of uninstalling. Deactivating does not do it: the
+	 * tables survive, and so do the origin stamps, which live on the content itself. So a
+	 * second run of the same test never reproduced the first, because by then every object
+	 * was already known.
+	 *
+	 * Rendered outside the settings form on purpose. It is not a setting and must not be
+	 * saved along with one — and putting a destructive button inside a form whose primary
+	 * action is "Save" is how it eventually gets pressed by accident.
+	 *
+	 * The list is exhaustive and specific. "Reset all data" is a sentence people will read
+	 * as including their pages, and the one thing this must never be mistaken for is
+	 * something that touches content.
+	 */
+	private function reset_data(): void {
+		if ( ! current_user_can( Access::CAP_MANAGE ) ) {
+			return;
+		}
+
+		Section::heading( __( 'Reset plugin data', 'ifs-deploy' ) );
+
+		echo '<div class="dp-note dp-note-danger">';
+		echo '<p class="dp-help"><strong>' . esc_html__( 'This removes, on this site only:', 'ifs-deploy' ) . '</strong></p>';
+		echo '<ul class="dp-list">';
+		printf( '<li>%s</li>', esc_html__( 'Every pending change, including ones never pushed.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'The whole deployment history, and every rollback restore point it refers to.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'The event log and the API access log.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'The deployment stamps on your content — the marks that record which objects have been deployed before. Removing them is what makes the next push behave like a first push.', 'ifs-deploy' ) );
+		echo '</ul>';
+
+		// The reassurance has to be as prominent as the warning, or the button does not get
+		// used at all — which is its own failure, since the alternative people reach for is
+		// deleting rows by hand.
+		printf(
+			'<p class="dp-help"><strong>%s</strong> %s</p>',
+			esc_html__( 'No content is touched.', 'ifs-deploy' ),
+			esc_html__( 'Not one page, post, image, category or setting of your site is deleted or altered — only this plugin\'s own records, and its bookkeeping meta on your content.', 'ifs-deploy' )
+		);
+
+		printf(
+			'<p class="dp-help">%s</p>',
+			esc_html__( 'It applies to THIS site only. The site at the other end keeps its own history, restore points and stamps — reset it there as well if you want both sides clean.', 'ifs-deploy' )
+		);
+		echo '</div>';
+
+		echo '<div class="dp-field"><span class="dp-field-label">' . esc_html__( 'Connection', 'ifs-deploy' ) . '</span>';
+		echo '<div class="dp-field-control">';
+		echo $this->toggle( // phpcs:ignore WordPress.Security.EscapeOutput -- escaped in toggle().
+			'reset_include_connection',
+			false,
+			false,
+			__( 'Also forget the credentials and the paired site', 'ifs-deploy' ),
+			true
+		);
+		echo '<p class="dp-help">' . esc_html__( 'Off by default. Leaving it off keeps the two sites paired so you can carry straight on testing; turning it on means regenerating credentials and entering them again on both sides.', 'ifs-deploy' ) . '</p>';
+		echo '</div></div>';
+
+		echo '<div class="dp-form-actions">';
+		printf(
+			'<button type="button" class="button ifs-deploy-danger" id="ifs-deploy-reset-data">%s</button>',
+			esc_html__( 'Reset All Plugin Data', 'ifs-deploy' )
+		);
+		echo '</div>';
 	}
 
 	/**

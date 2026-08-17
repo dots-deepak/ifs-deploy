@@ -171,6 +171,7 @@ require __DIR__ . '/../src/Export/MediaExporter.php';
 require __DIR__ . '/../src/Queue/Hasher.php';
 require __DIR__ . '/../src/Support/Json.php';
 require __DIR__ . '/../src/Queue/QueueRepository.php';
+require __DIR__ . '/../src/Queue/MediaLifecycle.php';
 require __DIR__ . '/../src/Detection/AttachmentObserver.php';
 
 use IfsDeploy\Detection\AttachmentObserver;
@@ -502,6 +503,129 @@ attachment( 71002, '2026/08/whatever.html', 'A page', 'publish', 'text/html' );
 $GLOBALS['types'][71002] = 'page';
 $observer->on_trash( 71002 );
 ok( 'but trashing a PAGE through the same hook is ignored', 0 === rows() );
+
+echo "\n=== a plugin or theme ARCHIVE is ignored on every path out of the library ===\n";
+//
+// Reported twice: `ifs-deploy-0.7.0.zip`, and then `ifs-deploy-0.11.1.zip` after the first
+// fix. The rule was applied by the CALLERS — `on_delete()` had it and `on_trash()` did not —
+// so an archive correctly ignored on upload still produced a "delete" pending change the
+// moment it was moved to the Trash, proposing to remove something Production never had.
+//
+// The guard now sits at the single point both hooks pass through, so a third removal hook
+// cannot reintroduce the hole.
+foreach ( array( 'on_trash', 'on_delete' ) as $hook ) {
+	reset_all();
+	attachment( 71100, '2026/08/ifs-deploy-0.11.1.zip', 'ifs-deploy-0.11.1.zip', 'inherit', 'application/zip' );
+
+	$observer->$hook( 71100 );
+	ok( "a zip removed via {$hook}() is not tracked", 0 === rows() );
+}
+
+// By EXTENSION as well as mime: `application/octet-stream` is what a server reports for a
+// file it does not recognise, and an unrecognised binary is exactly what must not deploy.
+reset_all();
+attachment( 71101, '2026/08/theme.zip', 'theme', 'inherit', 'application/octet-stream' );
+$observer->on_trash( 71101 );
+ok( 'and neither is one the server could not identify', 0 === rows() );
+
+// The rule must not swallow real content on its way past.
+reset_all();
+attachment( 71102, '2026/08/photo.png', 'photo', 'inherit', 'image/png' );
+$observer->on_trash( 71102 );
+ok( 'while an ordinary image still queues its removal', 1 === rows() );
+
+echo "\n=== added and removed before anyone pushed it leaves NOTHING behind ===\n";
+//
+// Uploading an image and deleting it again before pushing used to leave a "delete" row.
+// Pushing that asked Production to remove a file it had never been given, which failed with
+// "nothing matched, it was probably never deployed here" — an error about a mistake the
+// operator had already corrected themselves.
+reset_all();
+attachment( 71200, '2026/08/oops.png', 'oops', 'inherit', 'image/png' );
+
+$observer->on_change( 71200 );
+ok( 'the upload is tracked', 1 === rows() );
+ok( 'and reads as an addition', 'added' === (string) reset( $GLOBALS['wpdb']->rows )->action_label );
+
+$observer->on_trash( 71200 );
+ok( 'trashing it again removes the row entirely', 0 === rows() );
+
+/*
+ * BUT ONLY WHEN IT REALLY NEVER WENT ANYWHERE.
+ *
+ * `deployed_hash` is the proof. A row can be pending AND have been deployed before — that is
+ * exactly what editing already-live content looks like — and removing that content is a
+ * genuine deletion Production still has to be told about.
+ */
+reset_all();
+attachment( 71201, '2026/08/live.png', 'live', 'inherit', 'image/png' );
+
+$observer->on_change( 71201 );
+reset( $GLOBALS['wpdb']->rows )->deployed_hash = 'whatever-production-accepted';
+
+$observer->on_trash( 71201 );
+ok( 'a file Production already has still queues its removal', 1 === rows() );
+ok( 'as a delete', 'delete' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+ok( 'labelled as a trashing', 'trashed' === (string) reset( $GLOBALS['wpdb']->rows )->action_label );
+
+echo "\n=== the Action column says what the OPERATOR did ===\n";
+//
+// The queue stores `update`/`delete` because those are the only two things a deploy can do.
+// That is the wrong vocabulary for the person reading the list: trashing, restoring and
+// editing all read "update", which is why the column could not be trusted.
+reset_all();
+attachment( 71300, '2026/08/pic.png', 'pic', 'inherit', 'image/png' );
+
+$observer->on_change( 71300 );
+reset( $GLOBALS['wpdb']->rows )->deployed_hash = 'deployed';
+
+// A REAL edit. Re-running on_change() with identical content is correctly skipped by
+// upsert() — an unchanged object is not a pending change — so the second call has to
+// actually change something or this would assert nothing.
+$GLOBALS['titles'][71300] = 'pic, retitled';
+$observer->on_change( 71300 );
+
+ok( 'an edit to deployed media reads as an update', 'updated' === (string) reset( $GLOBALS['wpdb']->rows )->action_label );
+
+// Permanent deletion and trashing are different words for the operator even though they are
+// one instruction to the far side.
+reset_all();
+attachment( 71301, '2026/08/gone.png', 'gone', 'inherit', 'image/png' );
+$observer->on_change( 71301 );
+reset( $GLOBALS['wpdb']->rows )->deployed_hash = 'deployed';
+$observer->on_delete( 71301 );
+ok( 'a permanent delete says so', 'deleted' === (string) reset( $GLOBALS['wpdb']->rows )->action_label );
+
+echo "\n=== coming back out of the Trash is a RESTORE, and is tracked as one ===\n";
+//
+// `wp_untrash_post()` puts the status back, and whether that also fires `edit_attachment`
+// depends on how it does it — which is not something to depend on. The restore is listened
+// for explicitly so it is deterministic, and so the row says what happened.
+reset_all();
+attachment( 71400, '2026/08/back.png', 'back', 'inherit', 'image/png' );
+
+$observer->on_change( 71400 );
+reset( $GLOBALS['wpdb']->rows )->deployed_hash = 'deployed';
+
+$observer->on_trash( 71400 );
+$GLOBALS['statuses'][71400] = 'trash';
+ok( 'it is queued as a removal first', 'delete' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+
+// What wp_untrash_post() does, then the hook it fires.
+$GLOBALS['statuses'][71400] = 'inherit';
+$observer->on_untrash( 71400 );
+
+ok( 'restoring turns it back into an update', 'update' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+ok( 'and says RESTORED rather than updated', 'restored' === (string) reset( $GLOBALS['wpdb']->rows )->action_label );
+ok( 'still one row', 1 === rows() );
+
+// A restore of a non-attachment arriving on the same hook must be ignored, exactly as
+// trashing one is: `untrashed_post` fires for every post type.
+reset_all();
+attachment( 71401, '2026/08/page.html', 'A page', 'publish', 'text/html' );
+$GLOBALS['types'][71401] = 'page';
+$observer->on_untrash( 71401 );
+ok( 'and restoring a PAGE through the media hook is ignored', 0 === rows() );
 
 echo "\n=== and the save that trashing performs cannot overwrite it ===\n";
 //

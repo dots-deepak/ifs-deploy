@@ -5,6 +5,7 @@ namespace IfsDeploy\Detection;
 
 use IfsDeploy\Export\MediaExporter;
 use IfsDeploy\Queue\Hasher;
+use IfsDeploy\Queue\MediaLifecycle;
 use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Support\DebugLog;
 
@@ -21,7 +22,11 @@ final class AttachmentObserver {
 		$this->exporter = $exporter ?? new MediaExporter();
 	}
 
-	public function on_change( int $attachment_id ): void {
+	/**
+	 * @param string $label Force the recorded label. Only `on_untrash()` passes one; every
+	 *                      other caller lets the state decide.
+	 */
+	public function on_change( int $attachment_id, string $label = '' ): void {
 		if ( ! $this->should_track( $attachment_id ) ) {
 			return;
 		}
@@ -107,7 +112,25 @@ final class AttachmentObserver {
 		$post  = get_post( $attachment_id );
 		$title = ( $post instanceof \WP_Post ) ? $post->post_title : '';
 
-		$queued = $this->queue->upsert( 'media', (string) $package['subtype'], $attachment_id, $title, 'update', Hasher::hash( $package ) );
+		/*
+		 * Read BEFORE the write, because the row is about to be replaced and the label
+		 * depends on what it used to say. A row whose pending change was a removal, for an
+		 * attachment that is present again, is a RESTORE — and no amount of looking at the
+		 * attachment itself can tell that from an ordinary edit, since both end up
+		 * `inherit`.
+		 */
+		$previous = $this->queue->find( 'media', $attachment_id );
+		$deployed = null !== $previous && '' !== (string) ( $previous->deployed_hash ?? '' );
+
+		if ( '' === $label ) {
+			$label = MediaLifecycle::label_for_change(
+				$post instanceof \WP_Post ? (string) $post->post_status : '',
+				$previous,
+				$deployed
+			);
+		}
+
+		$queued = $this->queue->upsert( 'media', (string) $package['subtype'], $attachment_id, $title, 'update', Hasher::hash( $package ), '', $label );
 
 		/*
 		 * EVERY media queue write is recorded, naming the FILE and the HOOK.
@@ -517,52 +540,91 @@ final class AttachmentObserver {
 	 * depending on an origin stamp it may never have been given.
 	 */
 	public function on_trash( int $post_id ): void {
+		$this->queue_removal( $post_id, MediaLifecycle::TRASHED );
+	}
+
+	public function on_delete( int $attachment_id ): void {
+		$this->queue_removal( $attachment_id, MediaLifecycle::DELETED );
+	}
+
+	/**
+	 * Media has come back out of the Trash.
+	 *
+	 * ── WHY THIS IS ITS OWN HOOK ───────────────────────────────────────────────────
+	 *
+	 * `wp_untrash_post()` restores the status and fires `untrashed_post`. Whether it also
+	 * fires `edit_attachment` depends on how it puts the status back, and relying on that
+	 * is how a restore ended up tracked as an ordinary edit on some sites and not tracked
+	 * at all on others.
+	 *
+	 * Listening explicitly makes it deterministic, and lets the row say RESTORED rather
+	 * than "updated" — which is what the operator actually did, and the difference matters
+	 * when they are reading a list to decide what to push.
+	 */
+	public function on_untrash( int $post_id ): void {
 		$post = get_post( $post_id );
 
 		if ( ! $post instanceof \WP_Post || 'attachment' !== $post->post_type ) {
 			return;
 		}
 
-		$this->queue_removal( $post );
-	}
-
-	public function on_delete( int $attachment_id ): void {
-		$post = get_post( $attachment_id );
-		if ( ! $post instanceof \WP_Post || 'attachment' !== $post->post_type ) {
-			return;
-		}
-
-		/*
-		 * THE SAME RULE AS on_change(), and it was missing here.
-		 *
-		 * Blocking plugin/theme archives on upload but not on delete meant a ZIP that was
-		 * never tracked in the first place still produced a "delete" pending change when it
-		 * was removed — a deploy row proposing to delete something Production had never
-		 * been given. Reported with `ifs-deploy-0.7.0.zip` sitting in Pending Changes.
-		 *
-		 * A half-applied rule is worse than no rule: it looks handled while the other half
-		 * of the object's life goes on producing exactly what it was meant to stop.
-		 */
-		if ( ! $this->should_track( $attachment_id ) ) {
-			return;
-		}
-
-		$this->queue_removal( $post );
+		$this->on_change( $post_id, MediaLifecycle::RESTORED );
 	}
 
 	/**
 	 * Queue "this media is going away", however it is going.
 	 *
-	 * Trash and permanent delete arrive on different hooks, and the difference between
-	 * them DOES travel — but not from here. `DeploymentService::removal_intent()` reads it
-	 * at push time from whether the attachment still exists, which is both simpler than
-	 * threading it through the queue and more accurate: trashing an image and then
-	 * emptying the trash before pushing collapses to one row by hash, and only the final
-	 * state should be sent.
+	 * ── ONE GATE, AND EVERY REMOVAL PATH GOES THROUGH IT ───────────────────────────
 	 *
-	 * So both hooks queue the same thing on purpose. One method so they cannot drift.
+	 * `should_track()` used to be applied by the CALLERS. `on_delete()` had it and
+	 * `on_trash()` did not, so a plugin ZIP that was correctly ignored on upload still
+	 * produced a "delete" pending change the moment it was moved to the Trash — a row
+	 * proposing to remove something Production had never been given. Reported twice, with
+	 * `ifs-deploy-0.7.0.zip` and again with `ifs-deploy-0.11.1.zip`.
+	 *
+	 * The rule now lives at the single point both hooks pass through, so adding a third
+	 * removal hook later cannot reintroduce the same hole. That is the whole reason it
+	 * moved: a guard the caller has to remember is a guard that will eventually be
+	 * forgotten.
+	 *
+	 * `$kind` is only ever a LABEL. What gets sent is still decided at push time by
+	 * `DeploymentService::removal_intent()`, from whether the attachment still exists —
+	 * which stays correct when someone trashes an image and empties the Trash before
+	 * pushing, because those collapse to one row and only the final state should travel.
 	 */
-	private function queue_removal( \WP_Post $post ): void {
+	private function queue_removal( int $attachment_id, string $kind ): void {
+		$post = get_post( $attachment_id );
+
+		if ( ! $post instanceof \WP_Post || 'attachment' !== $post->post_type ) {
+			return;
+		}
+
+		if ( ! $this->should_track( $attachment_id ) ) {
+			return;
+		}
+
+		/*
+		 * NEVER DEPLOYED, SO THERE IS NOTHING TO REMOVE THERE.
+		 *
+		 * Uploading an image and deleting it again before pushing used to leave a "delete"
+		 * row behind. Pushing it asked Production to remove a file it had never received,
+		 * which failed with "nothing matched, it was probably never deployed here" — an
+		 * error about a mistake the operator had already corrected themselves.
+		 *
+		 * The pair of changes cancels out, so the row goes. `MediaLifecycle` decides,
+		 * because the same question has the same answer for every object type.
+		 */
+		if ( MediaLifecycle::cancels_out( $this->queue->find( 'media', $attachment_id ) ) ) {
+			$this->queue->forget( 'media', $attachment_id );
+
+			DebugLog::debug(
+				'Media added and removed before it was ever pushed; the pending change was dropped rather than becoming a deletion',
+				array( 'attachment' => $attachment_id, 'hook' => (string) current_filter() )
+			);
+
+			return;
+		}
+
 		$this->queue->upsert(
 			'media',
 			(string) $post->post_mime_type,
@@ -570,7 +632,9 @@ final class AttachmentObserver {
 			(string) $post->post_title,
 			'delete',
 			// Hash the action, so a later re-upload supersedes the removal row.
-			md5( 'delete:media:' . $post->ID )
+			md5( 'delete:media:' . $post->ID ),
+			'',
+			$kind
 		);
 	}
 }

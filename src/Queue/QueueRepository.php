@@ -36,7 +36,7 @@ final class QueueRepository {
 	 *
 	 * @return bool True when a row was written/updated, false when skipped.
 	 */
-	public function upsert( string $type, string $subtype, int $object_id, string $title, string $action, string $hash, string $baseline = '' ): bool {
+	public function upsert( string $type, string $subtype, int $object_id, string $title, string $action, string $hash, string $baseline = '', string $label = '' ): bool {
 		global $wpdb;
 
 		$table    = Schema::queue_table();
@@ -161,6 +161,7 @@ final class QueueRepository {
 					'object_subtype' => $subtype,
 					'object_title'   => $title,
 					'action'         => $action,
+					'action_label'   => $label,
 					'object_hash'    => $hash,
 					'baseline_hash'  => $baseline,
 					'status'         => self::STATUS_PENDING,
@@ -168,7 +169,7 @@ final class QueueRepository {
 					'updated_at'     => $now,
 				),
 				array( 'id' => (int) $existing->id ),
-				array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s' ),
+				array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s' ),
 				array( '%d' )
 			);
 
@@ -183,6 +184,7 @@ final class QueueRepository {
 				'object_id'      => $object_id,
 				'object_title'   => $title,
 				'action'         => $action,
+				'action_label'   => $label,
 				'object_hash'    => $hash,
 				'baseline_hash'  => $baseline,
 				'status'         => self::STATUS_PENDING,
@@ -190,7 +192,7 @@ final class QueueRepository {
 				'created_at'     => $now,
 				'updated_at'     => $now,
 			),
-			array( '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+			array( '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
 		);
 
 		return true;

@@ -5,6 +5,7 @@ namespace IfsDeploy\Detection;
 
 use IfsDeploy\Export\PostExporter;
 use IfsDeploy\Queue\Hasher;
+use IfsDeploy\Queue\MediaLifecycle;
 use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Support\Config;
 
@@ -111,6 +112,10 @@ final class PostObserver {
 			$baseline = '';
 		}
 
+		// Read before the write: a row whose pending change was a removal, for a post that
+		// is present again, is a RESTORE rather than an edit.
+		$previous = $this->queue->find( 'post', $post_id );
+
 		$this->queue->upsert(
 			'post',
 			(string) $post->post_type,
@@ -118,7 +123,12 @@ final class PostObserver {
 			(string) $post->post_title,
 			'update',
 			$hash,
-			$baseline
+			$baseline,
+			MediaLifecycle::label_for_change(
+				(string) $post->post_status,
+				$previous,
+				null !== $previous && '' !== (string) ( $previous->deployed_hash ?? '' )
+			)
 		);
 	}
 
@@ -135,6 +145,20 @@ final class PostObserver {
 			return;
 		}
 
+		/*
+		 * NEVER DEPLOYED, SO THERE IS NOTHING TO REMOVE ON THE OTHER SIDE.
+		 *
+		 * Drafting a page and deleting it again before pushing left a "delete" row behind,
+		 * which asked Production to remove something it had never been given — and failed
+		 * with an error about a mistake the author had already corrected themselves. The
+		 * two changes cancel out, so the row goes.
+		 */
+		if ( MediaLifecycle::cancels_out( $this->queue->find( 'post', $post_id ) ) ) {
+			$this->queue->forget( 'post', $post_id );
+
+			return;
+		}
+
 		$this->queue->upsert(
 			'post',
 			(string) $post->post_type,
@@ -142,7 +166,13 @@ final class PostObserver {
 			(string) $post->post_title,
 			'delete',
 			// Hash the action so a later re-create supersedes the delete row.
-			md5( 'delete:' . $post_id )
+			md5( 'delete:' . $post_id ),
+			'',
+			// `wp_trash_post` fires this hook too, so the post is still readable and its
+			// status says which of the two removals this is.
+			'trash' === (string) $post->post_status || 'wp_trash_post' === (string) current_filter()
+				? MediaLifecycle::TRASHED
+				: MediaLifecycle::DELETED
 		);
 	}
 

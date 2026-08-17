@@ -25,6 +25,12 @@ use IfsDeploy\Export\OptionExporter;
  *   6 — no schema change. `OptionExporter::option_id()` stopped deriving an option's
  *       queue id from crc32, so the rows filed under the old value are re-keyed —
  *       see migrate().
+ *  10 — queue gains `action_label`: what the OPERATOR did, as opposed to what the deploy
+ *       will do. `action` stays `update`/`delete` and still drives everything; the label
+ *       rides alongside it and is only displayed, so the Action column can say Trashed,
+ *       Restored, Published or Added instead of calling all four "update".
+ *       Re-runs the v9 archive sweep, because `on_trash()` did not apply the rule that
+ *       created it and went on producing plugin-ZIP rows after the upgrade.
  *   9 — no schema change. Removes pending queue rows the current rules would never have
  *       created: those with no author (`user_id = 0`), and plugin/theme archives.
  *   8 — the `api_addresses` table. The roster of callers is kept apart from the request
@@ -85,6 +91,21 @@ final class Schema {
 		}
 
 		if ( version_compare( $from, '9', '<' ) && '0' !== $from ) {
+			self::drop_untrackable_rows();
+		}
+
+		if ( version_compare( $from, '10', '<' ) && '0' !== $from ) {
+			/*
+			 * `action_label` is new, so every existing row has an empty one. The display
+			 * falls back to `action` for those, which reads correctly — so there is nothing
+			 * to backfill and nothing would be gained by guessing a better word for history
+			 * that has already happened.
+			 *
+			 * What DOES have to run again is the archive sweep. v9 removed plugin and theme
+			 * ZIPs, and then `on_trash()` — which did not apply the rule — went on creating
+			 * fresh ones every time such a file was moved to the Trash. Anyone who upgraded
+			 * to 9 still has them.
+			 */
 			self::drop_untrackable_rows();
 		}
 	}
@@ -335,6 +356,7 @@ final class Schema {
 				object_id bigint(20) unsigned NOT NULL,
 				object_title text NOT NULL,
 				action varchar(20) NOT NULL,
+				action_label varchar(20) NOT NULL DEFAULT '',
 				object_hash varchar(32) NOT NULL DEFAULT '',
 				deployed_hash varchar(32) NOT NULL DEFAULT '',
 				baseline_hash varchar(32) NOT NULL DEFAULT '',

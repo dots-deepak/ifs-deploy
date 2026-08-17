@@ -72,8 +72,17 @@ final class Assets {
 					/* translators: %d: how many items belong to other users */
 					'pushExcluded'          => __( '%d of these were made by someone else and will NOT be pushed.', 'ifs-deploy' ),
 					'pushTitle'             => __( 'Pushing changes to Production', 'ifs-deploy' ),
-					/* translators: 1: items done, 2: items total, 3: percentage complete */
-					'pushProgress'          => __( '%1$d of %2$d items — %3$d%% complete', 'ifs-deploy' ),
+					/*
+					 * ONE percent sign, not two.
+					 *
+					 * `%%` is how PHP's sprintf() escapes a literal percent, and this string
+					 * never reaches sprintf — the browser substitutes it with String.replace().
+					 * So the escape was printed verbatim and the dialog read "0%% complete".
+					 *
+					 * translators: 1: items done, 2: items total, 3: percentage complete
+					 */
+					'pushProgress'          => __( '%1$d of %2$d items — %3$d% complete', 'ifs-deploy' ),
+					'pushComplete'          => __( 'Finished. Refreshing the list…', 'ifs-deploy' ),
 					'pushPhaseMedia'        => __( 'Uploading media…', 'ifs-deploy' ),
 					'pushPhaseTerm'         => __( 'Syncing categories and tags…', 'ifs-deploy' ),
 					'pushPhasePost'         => __( 'Syncing posts and pages…', 'ifs-deploy' ),

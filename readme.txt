@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.11.1
+Stable tag: 0.12.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,32 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.12.0 =
+The Pending Changes list now says what you actually did, plugin archives stay out of it for
+good, and the push dialog shows the progress it was already measuring.
+
+* **The Action column names the real action.** It printed the two values the deploy uses
+  internally, so trashing a file, restoring one and editing one all read "update". It now
+  says Added, Updated, Published, Draft, Scheduled, Private, Restored, Trashed or Deleted.
+* **Plugin and theme ZIPs are ignored on every path.** The rule was applied where files are
+  uploaded but not where they are removed, so an archive correctly kept out of the list
+  still appeared in it the moment it was moved to the Trash. Existing rows are cleared on
+  upgrade.
+* **Something you add and remove before pushing now leaves nothing behind.** Uploading an
+  image and deleting it again left a pending deletion, which asked Production to remove a
+  file it had never been given and failed. The two changes cancel out.
+* **Restoring media from the Trash is tracked and syncs.** It relied on a hook that does not
+  reliably fire for a restore, so a recovered file could sit on Staging with nothing to push.
+* **The progress dialog no longer reads "0%%".** A percent sign was escaped for PHP in a
+  string the browser formats, so the escape was printed.
+* **The progress dialog is visible.** It closed and reloaded in the same instant the last
+  batch returned, so on a push small enough to be one request the bar was only ever seen at
+  zero. The finished state is now shown before the page refreshes, and the bar animates
+  while a batch is in flight instead of looking stalled.
+* **A push that could send nothing now says so.** If no item could be prepared, the push
+  reported success having transmitted nothing — the page reloaded and Production was
+  untouched, with no indication anything had gone wrong.
 
 = 0.11.1 =
 Fixes for media rollback and for removals that could not find their target.
@@ -355,6 +381,11 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.12.0 =
+The Action column now names the real action, plugin ZIPs stay out of Pending Changes, and
+the push progress dialog works. Includes a database upgrade, which runs itself. Update both
+sites together.
 
 = 0.11.1 =
 Fixes media rollback not being recorded, and removals that could not find their target.

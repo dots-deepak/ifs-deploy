@@ -7,6 +7,7 @@ use IfsDeploy\Admin\AdminMenu;
 use IfsDeploy\Admin\Section;
 use IfsDeploy\Admin\PreviewModal;
 use IfsDeploy\Client\QueueVerifier;
+use IfsDeploy\Queue\MediaLifecycle;
 use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Support\Access;
 use IfsDeploy\Support\Config;
@@ -177,7 +178,18 @@ final class PendingChangesPage {
 				(int) $item->id,
 				esc_html( $item->object_title ?: __( '(no title)', 'ifs-deploy' ) ),
 				esc_html( $this->type_label( $item ) ),
-				esc_html( $item->action ),
+				/*
+				 * WHAT THE OPERATOR DID, not what the deploy will do.
+				 *
+				 * This printed the raw `action`, so trashing a file, restoring one and
+				 * editing one all read "update" — and a removal read "delete" whether it
+				 * went to the Trash or was destroyed. Rows written before labels existed
+				 * have an empty one and fall back to their action, which still reads as a
+				 * word rather than a database value.
+				 */
+				// `??` as well as `?:` — the column is new, and a row read before the schema
+				// upgrade has run has no such property at all, which PHP 8 warns about.
+				esc_html( MediaLifecycle::describe( (string) ( ( $item->action_label ?? '' ) ?: $item->action ) ) ),
 				esc_html( $this->user_label( (int) ( $item->user_id ?? 0 ) ) ),
 				esc_html( $item->updated_at ),
 				esc_html( $item->status ),

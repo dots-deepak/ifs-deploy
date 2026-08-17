@@ -195,6 +195,7 @@ final class DeploymentService {
 	public function deploy_batch( string $uuid, array $queue_ids, int $user_id ): array {
 		$objects = array();
 		$mapped  = array();
+		$failed  = 0;
 
 		foreach ( $queue_ids as $queue_id ) {
 			$item = $this->queue->get( (int) $queue_id );
@@ -217,6 +218,7 @@ final class DeploymentService {
 				);
 
 				$this->queue->set_status( (int) $item->id, QueueRepository::STATUS_FAILED );
+				++$failed;
 				continue;
 			}
 
@@ -226,8 +228,38 @@ final class DeploymentService {
 		}
 
 		if ( empty( $objects ) ) {
-			// Not an error: rows can have been resolved or ignored between planning and
-			// sending. The push simply has nothing to do for this slice.
+			/*
+			 * NOTHING WAS SENT — and whether that is fine depends entirely on WHY.
+			 *
+			 * This returned a bare success for both cases, which is how a push could run to
+			 * "Deployment complete" having transmitted nothing at all: the dialog filled,
+			 * the page reloaded, and Production was untouched. Reported as "push kar rha hu
+			 * lekin live site pe koi changes nahi ho rahe".
+			 *
+			 * Rows that resolved themselves between planning and sending really are nothing
+			 * to do. A row whose PACKAGE COULD NOT BE BUILT is a failure, and it is already
+			 * marked failed above — so announcing success on top of that is the one thing
+			 * this must not do.
+			 */
+			if ( $failed > 0 ) {
+				return array(
+					'ok'      => false,
+					'message' => sprintf(
+						/* translators: %d: how many items could not be prepared */
+						_n(
+							'%d item could not be prepared for deployment and nothing was sent. It is marked failed — see Logs & Diagnostics.',
+							'%d items could not be prepared for deployment and nothing was sent. They are marked failed — see Logs & Diagnostics.',
+							$failed,
+							'ifs-deploy'
+						),
+						$failed
+					),
+					'uuid'    => $uuid,
+					'status'  => DeploymentRepository::STATUS_FAILED,
+					'results' => 0,
+				);
+			}
+
 			return array(
 				'ok'      => true,
 				'message' => '',

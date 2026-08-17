@@ -292,9 +292,14 @@ require __DIR__ . '/../src/Support/Schema.php';
 require __DIR__ . '/../src/Support/SafeData.php';
 require __DIR__ . '/../src/Support/MediaIdentity.php';
 require __DIR__ . '/../src/Support/MediaReferences.php';
+// MediaLifecycle reads QueueRepository::STATUS_PENDING rather than repeating the literal,
+// so the constant has to be loadable.
+require __DIR__ . '/../src/Queue/QueueRepository.php';
+require __DIR__ . '/../src/Queue/MediaLifecycle.php';
 require __DIR__ . '/../src/Import/MediaImporter.php';
 
 use IfsDeploy\Import\MediaImporter;
+use IfsDeploy\Queue\MediaLifecycle;
 use IfsDeploy\Support\MediaReferences;
 
 $pass = 0; $fail = 0;
@@ -689,6 +694,49 @@ ok(
 	false !== strpos( $snapshot_src, 'Cannot roll back: the object no longer exists on this site' )
 );
 
+echo "\n=== what a pending change SAYS happened ===\n";
+//
+// Two vocabularies on purpose. `action` is what the deploy will do (`update`/`delete`) and
+// keeps driving everything; the label is what the operator did, and is only displayed.
+// Printing the action was why the column read "update" for trashing, restoring and editing
+// alike.
+$row = static fn( string $action, string $status = 'pending', string $deployed = '' ): object =>
+	(object) array( 'action' => $action, 'status' => $status, 'deployed_hash' => $deployed );
+
+ok( 'a first upload is an addition', 'added' === MediaLifecycle::label_for_change( 'inherit', null, false ) );
+ok( 'an edit to deployed media is an update', 'updated' === MediaLifecycle::label_for_change( 'inherit', $row( 'update' ), true ) );
+ok( 'a first publish is a publish', 'published' === MediaLifecycle::label_for_change( 'publish', null, false ) );
+ok( 'publishing something already live is an update', 'updated' === MediaLifecycle::label_for_change( 'publish', $row( 'update' ), true ) );
+ok( 'a draft says draft', 'draft' === MediaLifecycle::label_for_change( 'draft', null, false ) );
+ok( 'a scheduled post says scheduled', 'scheduled' === MediaLifecycle::label_for_change( 'future', null, false ) );
+ok( 'a private post says private', 'private' === MediaLifecycle::label_for_change( 'private', null, false ) );
+
+// The one that cannot be read off the object: a restored attachment and an edited one are
+// both `inherit`, so only the row being replaced can tell them apart.
+ok( 'an object whose pending change was a removal is RESTORED', 'restored' === MediaLifecycle::label_for_change( 'inherit', $row( 'delete' ), true ) );
+ok( 'and that beats the status it happens to have', 'restored' === MediaLifecycle::label_for_change( 'publish', $row( 'delete' ), true ) );
+
+echo "\n=== every label reads as a word, including rows written before labels existed ===\n";
+foreach ( array( 'added', 'updated', 'restored', 'published', 'draft', 'scheduled', 'private', 'trashed', 'deleted' ) as $label ) {
+	ok( "{$label} is described", '' !== MediaLifecycle::describe( $label ) && $label !== MediaLifecycle::describe( $label ) );
+}
+
+ok( 'an old row falls back to its action', 'Updated' === MediaLifecycle::describe( 'update' ) );
+ok( 'and an old removal too', 'Removed' === MediaLifecycle::describe( 'delete' ) );
+ok( 'an unrecognised value is shown rather than dropped', 'something-new' === MediaLifecycle::describe( 'something-new' ) );
+
+echo "\n=== when a removal cancels a change nobody pushed ===\n";
+//
+// The proof is `deployed_hash`, not the status. A row can be PENDING and still have been
+// deployed before — that is what editing already-live content looks like — and removing
+// that content is a real deletion the far side has to be told about.
+ok( 'no row at all means the object predates tracking, so queue it', false === MediaLifecycle::cancels_out( null ) );
+ok( 'a pending row that never deployed cancels out', true === MediaLifecycle::cancels_out( $row( 'update' ) ) );
+ok( 'a pending row that HAS deployed does not', false === MediaLifecycle::cancels_out( $row( 'update', 'pending', 'abc' ) ) );
+ok( 'a settled row does not', false === MediaLifecycle::cancels_out( $row( 'update', 'deployed', 'abc' ) ) );
+ok( 'nor an ignored one', false === MediaLifecycle::cancels_out( $row( 'update', 'ignored' ) ) );
+
 echo "\n=== a report ===\n";
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

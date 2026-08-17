@@ -431,6 +431,18 @@
 		return IfsDeploy.i18n.pushEtaMinutes.replace( '%d', Math.ceil( seconds / 60 ) );
 	}
 
+	/**
+	 * How long the finished dialog stays up before the page reloads.
+	 *
+	 * Long enough for the completed bar to be seen, short enough not to feel like a delay.
+	 */
+	var PUSH_SETTLE_MS = 900;
+
+	/** Show or clear the "a request is in flight" animation on the track. */
+	function pushWorking( working ) {
+		pushDialog().find( '.ifs-deploy-progress-track' ).toggleClass( 'is-working', !! working );
+	}
+
 	function pushRender() {
 		var $d = pushDialog();
 		var percent = push.total ? Math.round( ( push.done / push.total ) * 100 ) : 0;
@@ -465,13 +477,39 @@
 
 		if ( ! push.batches.length ) {
 			var done = push.done;
-			pushClose();
-			reloadWith( IfsDeploy.i18n.pushDone.replace( '%d', done ), false );
+
+			/*
+			 * FINISH ON SCREEN BEFORE RELOADING.
+			 *
+			 * This used to close the dialog and reload in the same tick as the last batch
+			 * returning — so the browser never painted the finished state, and on a push
+			 * small enough to be one request the bar was only ever seen at 0 before the page
+			 * went away. It looked broken precisely when it had worked.
+			 *
+			 * The number is not the reason for the pause; the bar is already at 100 by the
+			 * time this runs. The pause exists so a frame is drawn at all.
+			 */
+			push.phase = '';
+			push.item = '';
+			push.note = IfsDeploy.i18n.pushComplete;
+			pushWorking( false );
+			pushRender();
+
+			window.setTimeout( function () {
+				pushClose();
+				reloadWith( IfsDeploy.i18n.pushDone.replace( '%d', done ), false );
+			}, PUSH_SETTLE_MS );
+
 			return;
 		}
 
 		var batch = push.batches.shift();
 		var startedAt = ( new Date() ).getTime();
+
+		// A batch is one request, so nothing measurable happens until it returns. The bar
+		// keeps its honest width and the track animates instead, which shows the push is
+		// alive without inventing a number for it.
+		pushWorking( true );
 
 		/*
 		 * Named BEFORE the request, not after it.
@@ -504,6 +542,8 @@
 				if ( ! push || push.cancelling ) {
 					return;
 				}
+
+				pushWorking( false );
 
 				if ( ! res || ! res.success ) {
 					/*

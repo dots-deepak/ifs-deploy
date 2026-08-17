@@ -70,6 +70,16 @@ final class ChangeTracker {
 		add_action( 'wp_trash_post', array( $this->media, 'on_trash' ), 10, 1 );
 		add_action( 'delete_attachment', array( $this->media, 'on_delete' ), 10, 1 );
 
+		/*
+		 * Coming BACK out of the Trash, listened for explicitly.
+		 *
+		 * `wp_untrash_post()` restores the status, and whether that also fires
+		 * `edit_attachment` depends on how it puts the status back — which is not something
+		 * to depend on. Registering for the restore itself makes it deterministic, and lets
+		 * the pending change say "Restored" instead of "Updated".
+		 */
+		add_action( 'untrashed_post', array( $this->media, 'on_untrash' ), 10, 1 );
+
 		// Navigation menus (create + change; a single hook covers both).
 		add_action( 'wp_update_nav_menu', array( $this->menus, 'on_change' ), 10, 1 );
 	}

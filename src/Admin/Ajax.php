@@ -442,7 +442,19 @@ final class Ajax {
 			wp_send_json_error( array( 'message' => __( 'Nothing to cancel.', 'ifs-deploy' ) ) );
 		}
 
-		$result = ( new DeploymentService() )->cancel( $uuid, $this->queue_ids() );
+		/*
+		 * NARROWED SILENTLY, NOT REFUSED.
+		 *
+		 * Every other caller stops the request and explains when a row is not the user's to
+		 * touch. A cancel must not: refusing it here would abort BEFORE `restore_pending()`
+		 * runs, leaving the rows that had already been pushed marked deployed — which is
+		 * precisely the outcome the cancel exists to prevent, reached by way of a permission
+		 * message about rows the user never asked to modify.
+		 *
+		 * Putting your own work back on the list is not a privileged act, and the ids come
+		 * from a plan this user already had permission to start.
+		 */
+		$result = ( new DeploymentService() )->cancel( $uuid, $this->queue_ids( false ) );
 
 		if ( ! empty( $result['ok'] ) ) {
 			wp_send_json_success( array( 'message' => $result['message'] ) );
@@ -664,9 +676,13 @@ final class Ajax {
 	 * A user without "see all" can only touch their own rows, enforced here against
 	 * the database rather than trusted from the page they were served.
 	 *
+	 * @param bool $refuse Stop the request and explain when rows were narrowed away.
+	 *                     False narrows SILENTLY, which is right for undoing something
+	 *                     rather than doing it — see `push_cancel()`.
+	 *
 	 * @return int[]
 	 */
-	private function queue_ids(): array {
+	private function queue_ids( bool $refuse = true ): array {
 		$raw = isset( $_POST['queue_ids'] ) ? wp_unslash( $_POST['queue_ids'] ) : array();
 		$raw = is_array( $raw ) ? $raw : array( $raw );
 		$ids = array_values( array_filter( array_map( 'absint', $raw ) ) );
@@ -708,7 +724,7 @@ final class Ajax {
 		 */
 		$refused = count( $ids ) - count( $owned );
 
-		if ( $refused > 0 ) {
+		if ( $refused > 0 && $refuse ) {
 			wp_send_json_error(
 				array(
 					'message' => $is_admin

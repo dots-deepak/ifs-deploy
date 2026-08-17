@@ -27,10 +27,11 @@ production) is a runtime setting, not a separate build.
 
 **Environment (current):**
 
-- Repo / working dir: **`d:\Projects\Wordpress\IFS [22020]\deploypress`** — still the old
-  folder name, deliberately: it is a git checkout and renaming it would break the clone. The
-  **release zip writes `ifs-deploy/` as the internal folder** regardless (§29), which is what
-  WordPress takes the slug from. Git branch: `ifs-deploy` (main branch: `main`).
+- Repo / working dir: **`d:\Projects\Wordpress\IFS [22020]\ifs-deploy`** — the only folder
+  that matters. The old `deploypress` checkout is abandoned; nothing here depends on it.
+  The **release zip writes `ifs-deploy/` as the internal folder** regardless of what the
+  checkout is called (§29), which is what WordPress takes the slug from. Git branch:
+  `ifs-deploy` (main branch: `main`).
 - The path contains `[22020]`, which **`glob()` reads as a character class** and silently
   matches nothing. Every tool and test in this repo uses `scandir()` instead. Tailwind's own
   content scanner is unaffected because its patterns are relative.
@@ -1652,10 +1653,10 @@ Recorded because they change how much of the older analysis to trust:
 php build-release.php        # → ifs-deploy-0.1.0.zip (98 files, ~552 KB)
 ```
 
-**The trap it exists to avoid:** the checkout is still named `deploypress`, and WordPress takes
-the plugin slug from the folder *inside* the zip. Zipping by hand produces a package that
-installs as `deploypress` with a text domain that no longer matches — and the mismatch is
-silent: everything works except translated strings. The script writes `ifs-deploy/` regardless.
+**The trap it exists to avoid:** WordPress takes the plugin slug from the folder *inside* the
+zip, and the text domain has to match that slug for translations to load. Zipping the checkout
+by hand ships whatever the local directory is called, and a mismatch is silent — everything
+works except translated strings. The script writes `ifs-deploy/` regardless.
 
 It **refuses to build** when something is actually broken: version disagreeing across the plugin
 header / `IFS_DEPLOY_VERSION` / readme `Stable tag`; text domain not equal to the slug;

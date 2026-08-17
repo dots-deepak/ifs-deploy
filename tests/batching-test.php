@@ -192,6 +192,63 @@ ok( 'a partial push can still be rolled back', false === strpos( $refused_status
 ok( 'while a failed one cannot', false !== strpos( $refused_statuses, 'STATUS_FAILED' ) );
 ok( 'nor a cancelled one', false !== strpos( $refused_statuses, 'STATUS_CANCELLED' ) );
 
+echo "\n=== a batch that outlives the cancel cannot un-restore the rows ===\n";
+//
+// ── THE BUG THIS EXISTS TO CATCH ───────────────────────────────────────────────────
+//
+// Reported as: cancelling a push REMOVED items from Pending Changes. It is a race between
+// two HTTP requests, not a logic error, which is why the restore looked correct in
+// isolation.
+//
+//   1. batch N is in flight; Production is applying it
+//   2. the user presses Cancel
+//   3. /cancel reverts what had landed, and restore_pending() puts every row back
+//   4. batch N finishes — and apply_results() marks its rows DEPLOYED, undoing step 3
+//   5. the page reloads and those rows are gone
+//
+// `push.cancelling` in the browser only stops the NEXT batch being queued. A request
+// already on the wire is not stopped by anything the browser does, so the flag has to live
+// where both processes can see it: the deployment record.
+ok( 'the cancelled state is read back from the record', false !== strpos( $batch_body, 'is_cancelled(' ) );
+ok( 'and it is a database read, not a variable', (bool) preg_match( '/is_cancelled\(\s*\$this->deployments->get_by_uuid\( \$uuid \)\s*\)/', $batch_body ) );
+
+// Checked BOTH sides of the request. Before it, so a batch that has not left never does;
+// after it, so one that already landed is undone.
+ok( 'a batch is refused before sending if the push is already cancelled', (bool) preg_match( '/is_cancelled\( \$deployment \)/', $batch_body ) );
+ok( 'and results are NOT applied when it was cancelled mid-flight', (bool) preg_match( '/is_cancelled\(.*?restore_pending\(.*?apply_results\(/s', $batch_body ) );
+
+// Two things are needed, not one: the rows go back, AND Production is told to undo this
+// batch too — it applied after the cancel had already swept the deployment.
+ok( 'the late batch is reverted on Production as well', (bool) preg_match( "/is_cancelled\(.*?post\(\s*'cancel'/s", $batch_body ) );
+// `$cancel` is the Production-side endpoint: it reports "nothing to undo" as a SUCCESS,
+// which is what makes calling it a second time safe.
+ok( 'which is safe because /cancel is idempotent', false !== strpos( $cancel, 'nothing_applied' ) );
+
+/*
+ * The flag must exist from the MOMENT Cancel is pressed, not only once some batch has
+ * created a record — cancelling before the first batch lands is exactly when none exists,
+ * and also when a still-queued batch is most likely to slip through.
+ *
+ * Scoped to DeploymentService::cancel()'s own body for the same reason the deploy_batch
+ * assertions are: several methods in this file create deployment records.
+ */
+preg_match( '/function cancel\( string \$uuid.*?(?=function [a-z_]+\()/s', $service, $cancel_slice );
+
+$cancel_body = (string) ( $cancel_slice[0] ?? '' );
+
+ok( 'the cancel body was isolated', '' !== $cancel_body && false === strpos( $cancel_body, 'function deploy_batch(' ) );
+ok( 'cancel records the state even with no record yet', (bool) preg_match( '/get_by_uuid\( \$uuid \).*?deployments->create\(\s*\$uuid.*?STATUS_CANCELLED/s', $cancel_body ) );
+ok( 'and it still restores the queue rows', false !== strpos( $cancel_body, 'restore_pending( $queue_ids )' ) );
+
+/*
+ * And the cancel must never be REFUSED for ownership: aborting there would return before
+ * restore_pending() ran, stranding the already-pushed rows as deployed — the exact outcome
+ * the cancel exists to prevent, reached via a permission message.
+ */
+$ajax_src = src( 'src/Admin/Ajax.php' );
+ok( 'the cancel narrows silently rather than refusing', (bool) preg_match( '/function push_cancel\(.*?queue_ids\( false \)/s', $ajax_src ) );
+ok( 'while an ordinary push still refuses', (bool) preg_match( '/function queue_ids\( bool \$refuse = true \)/', $ajax_src ) );
+
 echo "\n=== Reset All Plugin Data clears state and NEVER content ===\n";
 //
 // The one thing this feature must not be mistaken for is something that deletes pages.

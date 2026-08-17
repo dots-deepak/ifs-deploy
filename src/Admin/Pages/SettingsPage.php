@@ -1056,8 +1056,8 @@ final class SettingsPage {
 		 *
 		 * The button, its confirm dialog and its nonce field all existed; the handler did not.
 		 * So the one documented way to rotate a leaked shared secret silently did nothing —
-		 * the page reloaded, the keys were unchanged, and nothing said so. SECURITY.md §7 even
-		 * asserted this worked, which made the audit wrong as well as the feature missing.
+		 * the page reloaded, the keys were unchanged, and nothing said so. The audit itself
+		 * asserted this worked (SECURITY.md M-7), which made it wrong as well as missing.
 		 *
 		 * Rotation is the whole remedy if a secret is exposed, so it has to actually rotate.
 		 */

@@ -446,7 +446,7 @@ foreach ( $actions as $action ) {
 	}
 }
 
-echo "=== pushing is refused on a receiving site (SECURITY.md §13) ===\n";
+echo "=== pushing is refused on a receiving site (SECURITY.md, direction guard) ===\n";
 
 /*
  * The REST layer already answers 409 to `/import` and `/rollback` unless the receiver is set

@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.12.1
+Stable tag: 0.12.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,27 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.12.2 =
+Cancelling a push no longer loses the changes it was meant to keep.
+
+* **Cancelling a push no longer removes items from Pending Changes.** Pressing Cancel stops
+  the browser sending the NEXT batch, but a batch already on its way could not be stopped —
+  the server went on applying it, and marked its items as pushed a moment after the cancel
+  had put them back on the list. Those items then disappeared. Cancelling a push has never
+  meant discarding the work, and now it does not behave as though it did.
+* **A batch that arrives after a cancel is undone on Production too.** It landed after the
+  rest of the push had already been reverted, so its changes were live with nothing left to
+  say so.
+* **A push cancelled before its first batch lands is recorded.** Previously it left no entry
+  in Deployment History at all.
+* **Cancelling no longer fails on a permission check.** It could stop with a message about
+  rows belonging to someone else, before returning anything to the list — the exact outcome
+  cancelling exists to prevent.
+* **A spinner while a screen loads.** Switching tabs, and Compare & Sync in particular,
+  fetches from Production and can take a few seconds; the screen simply dimmed and gave no
+  sign it was working.
+* Plugin author and URI headers now name IFS Copperleaf rather than placeholders.
 
 = 0.12.1 =
 Pushes are recorded in Deployment History again, and there is a way to clear the plugin's
@@ -404,6 +425,10 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.12.2 =
+Fixes cancelling a push removing items from Pending Changes. No database upgrade. Update
+both sites together.
 
 = 0.12.1 =
 Pushes are recorded in Deployment History again, which also restores the Rollback button for

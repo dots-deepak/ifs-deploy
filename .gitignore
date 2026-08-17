@@ -1,0 +1,38 @@
+# What must NOT be committed.
+#
+# There was no .gitignore before, which is why build artefacts ended up tracked: the release
+# zip of every version was committed, and so was the 38 MB Tailwind binary. A binary in a
+# repository never shrinks — it stays in history whatever happens to the working tree — so
+# the point of this file is to stop the NEXT one going in.
+
+# --- Build output -----------------------------------------------------------
+#
+# Release zips are produced by build-release.php from the source that is already committed.
+# Committing them stores a second copy of the whole plugin per release, for ever.
+*.zip
+
+# --- Build tooling ----------------------------------------------------------
+#
+# The Tailwind standalone binary. Not part of the plugin, and 38 MB — roughly twenty times
+# everything else here put together. See the header of tailwind.config.js for where to get
+# it if you need to rebuild the CSS.
+tools/
+
+# --- Credentials ------------------------------------------------------------
+#
+# `.vscode/sftp.json` holds deploy passwords in plain text. Two are already in this repo's
+# history from before this rule existed, and history is why they have to be ROTATED rather
+# than merely deleted — removing the file does not remove what it once contained.
+.vscode/
+.idea/
+
+# --- Local noise ------------------------------------------------------------
+*.log
+*.sql
+*.bak
+*.orig
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+._*

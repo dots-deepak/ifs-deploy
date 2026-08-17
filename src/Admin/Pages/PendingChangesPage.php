@@ -141,7 +141,7 @@ final class PendingChangesPage {
 		 * this only decides whether the option is offered.
 		 */
 		if ( current_user_can( Access::CAP_MANAGE ) && current_user_can( Access::CAP_DEPLOY ) ) {
-			echo '<p class="dp-help">';
+			echo '<p class="dp-help mb-10">';
 			echo '<label><input type="checkbox" id="ifs-deploy-include-others" /> ';
 			echo esc_html__( 'Include changes made by other users when pushing. Leave this off to push only your own.', 'ifs-deploy' );
 			echo '</label></p>';

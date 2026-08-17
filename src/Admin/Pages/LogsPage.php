@@ -321,7 +321,7 @@ final class LogsPage {
 		// Says what is NOT here. A log that quietly omits rows is worse than a noisy one, so
 		// the omission is stated on the screen and the setting that controls it is named.
 		if ( ! ApiLog::logs_duplicates() ) {
-			echo '<p class="dp-help mb-20">' . esc_html__( 'Duplicate deliveries — the same request arriving twice, refused so nothing runs twice — are not listed. A deliberate replay still is. Settings → Log Retention → Duplicate deliveries turns them on.', 'ifs-deploy' ) . '</p>';
+			echo '<p class="dp-help mb-10">' . esc_html__( 'Duplicate deliveries — the same request arriving twice, refused so nothing runs twice — are not listed. A deliberate replay still is. Settings → Log Retention → Duplicate deliveries turns them on.', 'ifs-deploy' ) . '</p>';
 		}
 
 		echo '<table class="wp-list-table widefat fixed striped">';

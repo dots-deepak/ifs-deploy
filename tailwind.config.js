@@ -1,10 +1,26 @@
 /**
- * Tailwind config for IFS Deploy — see DESIGN.md.
+ * Tailwind config for IFS Deploy.
  *
- * Built with the STANDALONE CLI (no Node, no npm):
+ * Built with the STANDALONE CLI (no Node, no npm) — v3.4.19:
  *
- *   tools/tailwindcss.exe -i assets/css/src/admin.src.css -o assets/css/admin.css --watch
- *   tools/tailwindcss.exe -i assets/css/src/admin.src.css -o assets/css/admin.css --minify
+ *   tailwindcss.exe -c tailwind.config.js -i assets/css/src/admin.src.css -o assets/css/admin.css --watch
+ *   tailwindcss.exe -c tailwind.config.js -i assets/css/src/admin.src.css -o assets/css/admin.css --minify
+ *
+ * ── WHERE THE BINARY IS ────────────────────────────────────────────────────────
+ *
+ * NOT in this repo. It used to live at `tools/tailwindcss.exe` and was removed: it is a
+ * 38 MB executable, roughly twenty times the size of everything else here put together,
+ * and it is a build tool rather than part of the plugin. Nothing that ships uses it —
+ * `.distignore` already kept it out of every release zip.
+ *
+ * Download it from https://github.com/tailwindlabs/tailwindcss/releases — asset
+ * `tailwindcss-windows-x64.exe`, and it must be **v3.x**: this project is NOT on v4, whose
+ * config format is incompatible with the file below. Built with v3.4.19.
+ *
+ * Keep it anywhere outside the repo and point `-c` at this file.
+ *
+ * Only the SOURCE file needs it. `assets/css/admin.css` is committed already built, so
+ * anyone who is not editing styles never needs the binary at all.
  *
  * Three settings below are load-bearing. Changing any of them can break wp-admin
  * itself, not just this plugin:

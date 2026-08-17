@@ -516,6 +516,18 @@ body.ifs-deploy-modal-open {
 	.ifs-deploy-progress-bar {
 		transition: none;
 	}
+
+	/*
+	 * The tab spinner stops spinning but does NOT disappear.
+	 *
+	 * A stalled ring with one coloured edge reads as broken, so the ring is completed in
+	 * the accent colour instead — a deliberate marker rather than a spinner that failed to
+	 * start. The veil and `aria-busy` carry the meaning either way.
+	 */
+	.ifs-deploy .dp-tab-panel.is-loading::after {
+		animation: none;
+		border-color: #2F6B4F;
+	}
 }
 
 /* ===========================================================================
@@ -828,7 +840,16 @@ body.ifs-deploy-modal-open {
 }
 
 .ifs-deploy .dp-help {
-	@apply tw-m-0 tw-mt-1.5 tw-max-w-2xl tw-text-sm tw-text-grey-600;
+	@apply tw-m-0 tw-mt-1.5 tw-text-sm tw-text-grey-600;
+}
+
+/* Spacing override for a single element, e.g. `class="dp-help mb-10"`.
+   `!important` because the rule it overrides comes from @apply, and the minified output
+   does not guarantee source order between the two.
+   Scoped under `.ifs-deploy` like everything else here: `mb-10` is a common utility name
+   and an unscoped rule would apply to anything else on the admin page carrying it. */
+.ifs-deploy .mb-10 {
+	margin-bottom: 10px !important;
 }
 
 /* Overrides core's `.description`, which the diff panels and log tables still use. */
@@ -1936,12 +1957,67 @@ body.ifs-deploy-modal-open {
 	@apply tw-p-6;
 	/* Keeps the card from snapping shorter while a panel is in flight. */
 	min-height: 180px;
+	/* Anchors the loading veil and spinner below. Set on the base rule rather than on
+	   `.is-loading` so nothing can shift as the class is toggled. */
+	position: relative;
 }
 
-/* Fetching. Dimmed rather than blanked, so the panel does not jump to empty. */
+/*
+ * FETCHING A TAB.
+ *
+ * The previous panel stays on screen, veiled, rather than being blanked — a tab switch that
+ * empties the card first reads as "something broke" and makes the page jump twice.
+ *
+ * ── WHY A VEIL RATHER THAN opacity ON THE PANEL ────────────────────────────────────
+ *
+ * This used to be `opacity: .5` on the panel itself. `opacity` applies to an element's
+ * pseudo-elements as well, so a spinner drawn here would have been dimmed by the very rule
+ * meant to dim the content behind it — a half-faded spinner on half-faded text, which is
+ * exactly as unclear as it sounds. The veil is a separate layer, so the spinner above it
+ * stays at full contrast.
+ *
+ * ── WHY THIS IS NEEDED AT ALL ──────────────────────────────────────────────────────
+ *
+ * Two tabs are marked `lazy` in Tabs.php because rendering them performs a REMOTE request:
+ * Compare & Sync signs a request to Production and pulls its whole index (up to 2000
+ * posts), and Pending Changes verifies the queue against it. Those are the slow ones, and
+ * dimming alone gave no sign that anything was happening — the screen just sat there.
+ */
 .ifs-deploy .dp-tab-panel.is-loading {
-	@apply tw-pointer-events-none tw-opacity-50;
-	transition: opacity .12s ease;
+	@apply tw-pointer-events-none;
+}
+
+.ifs-deploy .dp-tab-panel.is-loading::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	background: rgba(255, 255, 255, .65);
+}
+
+.ifs-deploy .dp-tab-panel.is-loading::after {
+	content: "";
+	position: absolute;
+	z-index: 2;
+	/* Near the top, not centred: the panel keeps the OUTGOING tab's height, which can be
+	   several screens, and a vertically centred spinner would land below the fold on
+	   exactly the slow tabs this exists for. loadTab() scrolls to top, so here it is
+	   always in view. */
+	top: 64px;
+	left: 50%;
+	width: 28px;
+	height: 28px;
+	margin-left: -14px;
+	border: 3px solid rgba(25, 27, 28, .15);
+	border-top-color: #2F6B4F;
+	border-radius: 50%;
+	animation: ifs-deploy-spin .7s linear infinite;
+}
+
+@keyframes ifs-deploy-spin {
+	to {
+		transform: rotate(360deg);
+	}
 }
 
 .ifs-deploy .dp-tab-error {

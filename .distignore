@@ -18,8 +18,12 @@
 
 # --- Build tooling ----------------------------------------------------------
 #
-# `tools/` is the 39 MB Tailwind standalone binary. `tailwind.config.js` only matters when
-# rebuilding the CSS, which is done before packaging, never on a site.
+# `tools/` held the 38 MB Tailwind standalone binary and no longer exists in this repo — see
+# the header of tailwind.config.js for where the binary lives now. The entry stays so that a
+# local copy put back there cannot accidentally end up in a release zip.
+#
+# `tailwind.config.js` only matters when rebuilding the CSS, which is done before packaging,
+# never on a site.
 tools
 tailwind.config.js
 build-release.php

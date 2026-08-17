@@ -6,11 +6,10 @@
  *
  * ── THE TRAP THIS EXISTS TO AVOID ──────────────────────────────────────────────
  *
- * The working directory is still named `deploypress` — it is a git checkout, and renaming it
- * would break the clone. WordPress takes the plugin SLUG from the folder inside the zip, and
- * the text domain has to match that slug for translations to load. So zipping the folder by
- * hand produces a package that installs as `deploypress`, with a text domain that no longer
- * matches, and the mismatch is silent: everything works except translated strings.
+ * WordPress takes the plugin SLUG from the name of the folder INSIDE the zip, and the text
+ * domain has to match that slug for translations to load. Zipping the checkout by hand
+ * therefore ships whatever the local directory happens to be called, and if that is not
+ * `ifs-deploy` the mismatch is silent: everything works except translated strings.
  *
  * This writes the correct folder name into the archive regardless of what the checkout is
  * called, and refuses to run if the two facts it depends on — the slug and the version — do not

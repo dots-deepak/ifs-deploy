@@ -315,6 +315,28 @@ final class DeploymentService {
 		 */
 		$deployment = $this->deployments->get_by_uuid( $uuid );
 
+		/*
+		 * ── ALREADY CANCELLED: SEND NOTHING ────────────────────────────────────────────
+		 *
+		 * Half of a race, and the half that is easy to miss. Pressing Cancel sets
+		 * `push.cancelling` in the browser, which stops it QUEUEING further batches — but a
+		 * batch whose request had already left is not stopped by anything, and neither is
+		 * one that was about to be sent as the click landed.
+		 *
+		 * Refusing here means a batch that has not yet reached Production never does.
+		 */
+		if ( null !== $deployment && self::is_cancelled( $deployment ) ) {
+			$this->queue->restore_pending( array_values( $mapped ) );
+
+			return array(
+				'ok'      => false,
+				'message' => __( 'This push was cancelled, so nothing further was sent. Your changes are still listed here.', 'ifs-deploy' ),
+				'uuid'    => $uuid,
+				'status'  => DeploymentRepository::STATUS_CANCELLED,
+				'results' => 0,
+			);
+		}
+
 		$deployment_id = null !== $deployment
 			? (int) $deployment->id
 			: $this->deployments->create( $uuid, $user_id, DeploymentRepository::STATUS_PENDING );
@@ -350,6 +372,50 @@ final class DeploymentService {
 
 			$body    = (array) $response['body'];
 			$results = is_array( $body['results'] ?? null ) ? $body['results'] : array();
+
+			/*
+			 * ── CANCELLED WHILE THIS REQUEST WAS IN FLIGHT ─────────────────────────────
+			 *
+			 * THE BUG THIS FIXES: cancelling a push removed rows from Pending Changes.
+			 *
+			 * Cancel and the batch it interrupts are two separate HTTP requests running at
+			 * the same time, and the browser cannot stop the one already on the wire — the
+			 * server goes on processing it whatever the browser does with the response. So:
+			 *
+			 *   1. batch N is in flight; Production is applying it
+			 *   2. the user presses Cancel
+			 *   3. /cancel reverts what had landed, and `restore_pending()` puts every row
+			 *      back to pending on this side
+			 *   4. batch N *finishes* — and `apply_results()` below marked its rows
+			 *      DEPLOYED, undoing step 3
+			 *   5. the page reloads and those rows are gone from Pending Changes
+			 *
+			 * The user's work disappeared because a request the cancel was meant to stop
+			 * outlived it. "I cancelled a push" never means "discard those changes".
+			 *
+			 * Two things are needed, not one. The rows go back (again, and this time last),
+			 * and Production is told to undo THIS batch too — it applied after the cancel
+			 * had already swept the deployment, so its objects are live and its snapshots
+			 * are new. `/cancel` is idempotent by design, which is what makes calling it a
+			 * second time safe.
+			 */
+			if ( self::is_cancelled( $this->deployments->get_by_uuid( $uuid ) ) ) {
+				DebugLog::warning(
+					'A batch completed after its push had been cancelled; reverting it and returning the rows to Pending Changes',
+					array( 'uuid' => $uuid, 'objects' => count( $objects ) )
+				);
+
+				$this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
+				$this->queue->restore_pending( array_values( $mapped ) );
+
+				return array(
+					'ok'      => false,
+					'message' => __( 'This push was cancelled while the last batch was still being sent. That batch has been undone on Production, and your changes are still listed here.', 'ifs-deploy' ),
+					'uuid'    => $uuid,
+					'status'  => DeploymentRepository::STATUS_CANCELLED,
+					'results' => 0,
+				);
+			}
 
 			$this->apply_results( $results, $mapped );
 
@@ -391,6 +457,20 @@ final class DeploymentService {
 		} finally {
 			$lock->release_all();
 		}
+	}
+
+	/**
+	 * Has this push been cancelled?
+	 *
+	 * Read from the deployment record rather than held in memory, because the two requests
+	 * that need to agree about it — the cancel and the batch it is racing — are separate
+	 * PHP processes that share nothing but the database.
+	 *
+	 * @param object|null $deployment A deployment row, or null when there is none.
+	 */
+	private static function is_cancelled( ?object $deployment ): bool {
+		return null !== $deployment
+			&& DeploymentRepository::STATUS_CANCELLED === (string) ( $deployment->deployment_status ?? '' );
 	}
 
 	/**
@@ -699,11 +779,26 @@ final class DeploymentService {
 		 * state is "do not offer to undo it again", and the message below already tells the
 		 * operator to check Production directly.
 		 */
+		/*
+		 * RECORDED BEFORE ANYTHING ELSE, and recorded even when there is no record yet.
+		 *
+		 * This is the flag `deploy_batch()` reads to refuse a batch that is still in flight
+		 * or about to be sent — so it has to exist from the moment Cancel is pressed, not
+		 * only once some batch has happened to create a deployment row. Cancelling before
+		 * the first batch lands is exactly when no row exists, and it is also when a
+		 * still-queued batch is most likely to slip through.
+		 *
+		 * Creating it also means a cancelled push appears in Deployment History at all,
+		 * which it previously did not when it was stopped early.
+		 */
 		$deployment = $this->deployments->get_by_uuid( $uuid );
 
-		if ( null !== $deployment ) {
-			$this->deployments->set_status( (int) $deployment->id, DeploymentRepository::STATUS_CANCELLED );
-		}
+		$this->deployments->set_status(
+			null !== $deployment
+				? (int) $deployment->id
+				: $this->deployments->create( $uuid, get_current_user_id(), DeploymentRepository::STATUS_CANCELLED ),
+			DeploymentRepository::STATUS_CANCELLED
+		);
 
 		/*
 		 * The queue is restored EVEN IF the remote call failed.

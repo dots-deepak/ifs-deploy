@@ -386,8 +386,13 @@ echo "=== the counting queries agree with is_failure() ===\n";
 // Three queries decide what the admin sees and what raises an alert. If any of them still
 // used `outcome <> 'ok'`, the fix above would be contradicted by the numbers on screen.
 ok( 'the suspicion count excludes both', (bool) preg_match( '/COUNT\(\*\) FROM \{\$table\} WHERE ip = %s AND outcome NOT IN \( %s, %s \)/', $api ) );
-ok( 'the per-address failure total excludes both', 2 === substr_count( $api, 'CASE WHEN outcome NOT IN ( %s, %s )' ) );
 ok( 'and nothing compares against ok alone any more', false === strpos( $api, 'outcome <> %s' ) );
+
+// The per-address and summary totals no longer GROUP over the request rows — they read the
+// address roster, which is counted by touch_address() and therefore has to make the same
+// distinction at the moment of counting instead.
+ok( 'the roster counts a failure only when is_failure() said so', (bool) preg_match( '/failures\s*=\s*failures \+ %d/', $api ) );
+ok( 'and is given that decision, not a re-derived one', (bool) preg_match( '/touch_address\(\s*\$ip,\s*\$route,\s*\$outcome,\s*\$is_failure/', $api ) );
 
 echo "=== duplicate rows are off by default, and switchable ===\n";
 
@@ -449,6 +454,26 @@ class DP_ApiLog_WPDB {
 		return 1;
 	}
 
+	/**
+	 * The address roster's upsert, and anything else run as raw SQL.
+	 *
+	 * Recorded rather than ignored: `record()` counts EVERY request against its address —
+	 * including the routine accepted ones that no longer earn a row of their own — so a
+	 * stub that silently swallowed this would let the counting break without a test
+	 * noticing.
+	 */
+	public array $address_writes = array();
+
+	public function query( $query ) {
+		$this->address_writes[] = (string) $query;
+
+		return 1;
+	}
+
+	public function delete( $table, $where, $format = null ) {
+		return 1;
+	}
+
 	public function get_results( $query ) {
 		return array();
 	}
@@ -468,21 +493,33 @@ $db              = new DP_ApiLog_WPDB();
 $db->known       = array( '203.0.113.9' );
 $GLOBALS['wpdb'] = $db;
 
+/*
+ * A ROUTINE ACCEPTED REQUEST GETS NO ROW.
+ *
+ * Every step of a deploy is an API call — object, signatures, import, rollback preview,
+ * rollback — so a working pair wrote a handful of "accepted" rows per push, for ever, and
+ * the table grew without ever saying anything. A list where every entry reads "fine" is
+ * not a security log; it is where failures go to hide.
+ *
+ * Nothing is lost by counting rather than listing: the request is recorded against its
+ * address, which is what the totals and the roster are read from.
+ */
 ApiLog::record( 'signatures', ApiLog::OK, 200 );
-ok( 'an accepted request is recorded', 1 === count( $db->rows ) );
+ok( 'an accepted request from a known address is NOT listed', 0 === count( $db->rows ) );
+ok( 'but it IS counted against the address', 1 === count( $db->address_writes ) );
 
 ApiLog::record( 'signatures', ApiLog::DUPLICATE, 409 );
-// THE assertion behind the report. The event is already on the table once; the second
-// delivery of the same request is not news.
-ok( 'the duplicate that follows it is not', 1 === count( $db->rows ) );
+// THE assertion behind the report. The second delivery of the same request is not news.
+ok( 'nor is the duplicate that follows it', 0 === count( $db->rows ) );
+ok( 'and it is counted too', 2 === count( $db->address_writes ) );
 
 ApiLog::record( 'signatures', 'ifs_deploy_replay', 409 );
-ok( 'but a deliberate replay still is', 2 === count( $db->rows ) );
-ok( 'and it is recorded as a replay, not a duplicate', 'ifs_deploy_replay' === $db->rows[1]['outcome'] );
+ok( 'but a deliberate replay IS listed', 1 === count( $db->rows ) );
+ok( 'and it is recorded as a replay, not a duplicate', 'ifs_deploy_replay' === $db->rows[0]['outcome'] );
 
 ApiLog::set_logs_duplicates( true );
 ApiLog::record( 'signatures', ApiLog::DUPLICATE, 409 );
-ok( 'with the setting on, duplicates are recorded', 3 === count( $db->rows ) );
+ok( 'with the setting on, duplicates are listed again', 2 === count( $db->rows ) );
 ApiLog::set_logs_duplicates( false );
 
 echo "=== but a duplicate from an UNKNOWN address is always recorded ===\n";
@@ -499,6 +536,27 @@ ApiLog::record( 'import', ApiLog::DUPLICATE, 409 );
 
 ok( 'a first sighting is never dropped', 1 === count( $db->rows ) );
 ok( 'and is flagged as new', 1 === (int) $db->rows[0]['is_new_ip'] );
+
+echo "\n=== Clear keeps the address roster ===\n";
+//
+// The two answer different questions and are stored apart for exactly this reason. The
+// roster — which machines call this site — is the part worth keeping and the part that took
+// time to accumulate; the request list is a scratchpad of first sightings and failures.
+// Wiping the roster as a side effect of tidying that scratchpad cannot be undone.
+$api_src = (string) php_strip_whitespace( __DIR__ . '/../src/Support/ApiLog.php' );
+
+ok( 'clear() only touches the request table', (bool) preg_match( '/function clear\(\).*?api_log_table\(\).*?DELETE FROM/s', $api_src ) );
+ok( 'and never the roster', 0 === preg_match( '/function clear\(\).*?api_addresses_table/s', $api_src ) );
+
+// Which makes a deliberate, per-address removal the only way to drop one.
+ok( 'an address can be forgotten individually', false !== strpos( $api_src, 'function forget_ip(' ) );
+ok( 'which removes it from the roster', (bool) preg_match( '/function forget_ip\(.*?api_addresses_table\(\)/s', $api_src ) );
+ok( 'and its request rows with it', (bool) preg_match( '/function forget_ip\(.*?api_log_table\(\)/s', $api_src ) );
+
+// "Is this address known?" must not depend on how long request rows happen to be kept, or
+// the paired site is announced as a brand new caller every time the log is cleared or aged.
+ok( 'is_new_ip() reads the roster', (bool) preg_match( '/function is_new_ip\(.*?api_addresses_table\(\)/s', $api_src ) );
+ok( 'and the roster is not aged out by retention', false === strpos( (string) php_strip_whitespace( __DIR__ . '/../src/Support/LogRetention.php' ), 'api_addresses' ) );
 
 echo "=== the omission is stated on the screen ===\n";
 

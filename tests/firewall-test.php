@@ -399,5 +399,68 @@ ok( 'iframe was added', isset( $allowed['iframe']['src'] ) );
 ok( 'form was added', isset( $allowed['form']['action'] ) );
 ok( 'svg path was added', isset( $allowed['path']['d'] ) );
 
+echo "\n=== a rebuilt tag is NOT a removal ===\n";
+//
+// THE REPORTED CASE: editing a page produced a WARNING on every single deploy —
+// "Removed disallowed markup from 'About Copperleaf' on import: disallowed markup" —
+// naming nothing, because none of the security patterns had matched and the code fell
+// back to a catch-all label.
+//
+// kses does not return the string it was given even when it keeps everything: it rebuilds
+// every tag, so attribute order, quoting and spacing can all change while the markup means
+// exactly the same thing. Reporting that as a removal is alarming and untrue, and a warning
+// that cries wolf on every push is one nobody reads when it finally matters.
+
+dp_set_mode( 'filter' );
+
+$reserialised = array(
+	'single-quoted attributes'  => "<p class='intro'>Hello</p>",
+	'unquoted attribute'        => '<td colspan=2>Cell</td>',
+	'odd internal spacing'      => '<a   href="/x"    title="y" >Link</a>',
+	'uppercase tag name'        => '<STRONG>Bold</STRONG>',
+	'unclosed paragraph'        => '<p>One<p>Two',
+);
+
+foreach ( $reserialised as $what => $html ) {
+	$result = $FW::apply( $html, 'post_content' );
+
+	ok( "$what is not reported as a change", false === $result['changed'] );
+	ok( "and names nothing removed ($what)", array() === $result['removed'] );
+}
+
+echo "\n=== but anything genuinely dropped is NAMED ===\n";
+//
+// The other half of the same fix: the catch-all said "disallowed markup" even when it
+// could have said which attribute went. An unactionable warning is only marginally better
+// than none.
+
+// NOT srcset or form — the extended allowlist restores both, as the assertions above
+// prove. An attribute that is genuinely unknown to kses is what this needs.
+$stripped = $FW::apply( '<p class="intro" bogusattr="1">Text</p>', 'post_content' );
+ok( 'a stripped attribute is reported', true === $stripped['changed'] );
+ok( 'and named exactly', in_array( 'bogusattr', $stripped['removed'], true ) )
+	or printf( "        got: %s\n", implode( ', ', $stripped['removed'] ) );
+ok( 'the catch-all label is gone', ! in_array( 'disallowed markup', $stripped['removed'], true ) );
+
+// Security-relevant removals keep their readable labels rather than becoming bare
+// attribute names — "inline event handler" says more than "onclick".
+$handler = $FW::apply( '<a href="/x" onclick="steal()">Link</a>', 'post_content' );
+ok( 'an event handler keeps its readable label', in_array( 'inline event handler', $handler['removed'], true ) );
+
+$script = $FW::apply( '<p>Hi</p><script>alert(1)</script>', 'post_content' );
+ok( 'a script tag is still named', in_array( 'script tag', $script['removed'], true ) );
+
+// A disallowed TAG is named as such. `<marquee>` is not on the allowlist and carries no
+// security label, so it exercises the tag-counting path rather than the patterns.
+$tag = $FW::apply( '<div><marquee>Scroll</marquee></div>', 'post_content' );
+ok( 'a disallowed tag is reported', true === $tag['changed'] );
+ok( 'and named as a tag', in_array( '<marquee>', $tag['removed'], true ) )
+	or printf( "        got: %s\n", implode( ', ', $tag['removed'] ) );
+
+// Attribute counting must be scoped to tags: prose contains "x = 1" often enough, and
+// counting that as an attribute would report phantom removals whenever a sentence changed.
+$prose = $FW::apply( '<p>Let x = 1 and y = 2, then z = 3.</p>', 'post_content' );
+ok( 'prose containing "=" is not read as attributes', false === $prose['changed'] );
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

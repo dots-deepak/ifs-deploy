@@ -130,7 +130,16 @@ final class PendingChangesPage {
 		 * for. Only rendered for users who can see all changes — for anyone else the server
 		 * narrows the ids regardless of what the page sends.
 		 */
-		if ( $sees_all && current_user_can( Access::CAP_DEPLOY ) ) {
+		/*
+		 * ADMINISTRATORS ONLY — not everyone who can SEE all changes.
+		 *
+		 * Seeing and publishing are different powers. An editor may legitimately need to
+		 * review the whole team's queue without being able to push a colleague's
+		 * half-finished page, which is the most likely way to publish something nobody
+		 * intended. `Ajax::queue_ids()` enforces the same rule against the database, so
+		 * this only decides whether the option is offered.
+		 */
+		if ( current_user_can( Access::CAP_MANAGE ) && current_user_can( Access::CAP_DEPLOY ) ) {
 			echo '<p class="dp-help">';
 			echo '<label><input type="checkbox" id="ifs-deploy-include-others" /> ';
 			echo esc_html__( 'Include changes made by other users when pushing. Leave this off to push only your own.', 'ifs-deploy' );

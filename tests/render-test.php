@@ -1261,11 +1261,14 @@ $src_css = (string) file_get_contents( $root . '/assets/css/src/admin.src.css' )
  *
  * `.dp-env-card` and `.ifs-deploy-card` are authored as one surface so they cannot drift
  * apart the next time one is touched — counted in the SOURCE, because that is where the
- * duplication would appear. The ambient glow is currently authored on `.ifs-deploy-card`
- * only; `.dp-env-card` carries the border alone. If the two are ever unified, raise this
- * count to 2 and restore the shadow assertion in the built-rule loop below.
+ * duplication would appear.
+ *
+ * AT LEAST two, not exactly two: this is a shared surface token, and other components
+ * legitimately reuse it (toasts do). Pinning the exact number turned a correct reuse into
+ * a test failure. What must hold is that BOTH cards carry it, and the built-rule loop
+ * below asserts precisely that.
  */
-ok( 'the border is authored on both cards', 2 === substr_count( $src_css, 'border: 1px solid #EAEAEA;' ) );
+ok( 'the border is authored on both cards', substr_count( $src_css, 'border: 1px solid #EAEAEA;' ) >= 2 );
 ok( 'the ambient glow is authored once', 1 === substr_count( $src_css, 'box-shadow: rgba(149, 157, 165, .2) 0 0 8px;' ) );
 
 foreach ( array( 'dp-env-card', 'ifs-deploy-card' ) as $class ) {

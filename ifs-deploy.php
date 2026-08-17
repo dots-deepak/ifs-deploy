@@ -3,7 +3,7 @@
  * Plugin Name:       IFS Deploy
  * Plugin URI:        https://example.com/ifs-deploy
  * Description:       Deploy WordPress content from Staging to Production safely. Track changes, push selected content, and roll back.
- * Version:           0.5.0
+ * Version:           0.11.1
  * Requires at least: 6.5
  * Requires PHP:      8.0
  * Author:            IFS Deploy
@@ -35,6 +35,14 @@
  *   - REST namespace `ifs-deploy/v1` — Staging signs requests to
  *     `…/wp-json/ifs-deploy/v1/import`. Update one side only and every deploy 404s.
  *   - The six `X-IFS-Deploy-*` headers — the verifier reads them by name.
+ *
+ * Individual ROUTES are wire format too, and they are added more often than the namespace
+ * changes: `/cancel` and `/id-space` are both newer than the first release, and an older
+ * peer answers 404 to each. The feature simply does not work until both sides are updated.
+ *
+ * So are the PACKAGE FIELDS. `removal` says whether a deletion was a trash or a permanent
+ * delete; a Production that does not read it falls back to trashing, which is the
+ * recoverable guess but not always the right one.
  *
  * The v1/v2 protocol negotiation in SECURITY.md §11 does NOT cover this. That handles the
  * signature FORMAT and lets the pair upgrade itself in either order; it cannot help when the
@@ -68,8 +76,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'IFS_DEPLOY_VERSION', '0.5.0' );
-define( 'IFS_DEPLOY_DB_VERSION', '7' );
+define( 'IFS_DEPLOY_VERSION', '0.11.1' );
+define( 'IFS_DEPLOY_DB_VERSION', '9' );
 define( 'IFS_DEPLOY_FILE', __FILE__ );
 define( 'IFS_DEPLOY_DIR', plugin_dir_path( __FILE__ ) );
 define( 'IFS_DEPLOY_URL', plugin_dir_url( __FILE__ ) );

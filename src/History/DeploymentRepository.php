@@ -19,6 +19,18 @@ final class DeploymentRepository {
 	public const STATUS_FAILED      = 'failed';
 	public const STATUS_ROLLED_BACK = 'rolled_back';
 
+	/**
+	 * The push was cancelled part-way and everything it had applied was reverted.
+	 *
+	 * Its own status rather than reusing `rolled_back`, because the two are different
+	 * events and the difference matters when reading history: a rollback undoes a
+	 * deployment that COMPLETED and was then judged wrong, while this one never finished
+	 * at all. Recording it as a rollback would also imply a rollback entry the user
+	 * explicitly did not want — a cancel leaves ONE line saying it was cancelled, not a
+	 * deploy followed by an undo of it.
+	 */
+	public const STATUS_CANCELLED = 'cancelled';
+
 	public function create( string $uuid, int $user_id, string $status = self::STATUS_PENDING ): int {
 		global $wpdb;
 

@@ -27,6 +27,24 @@ final class AttachmentObserver {
 		}
 
 		/*
+		 * A TRASHED ATTACHMENT IS A REMOVAL, NOT AN EDIT.
+		 *
+		 * Exactly the trap `PostObserver` has: `wp_trash_post()` finishes by calling
+		 * `wp_update_post()`, which fires `edit_attachment` for an attachment. So the
+		 * delete row written a moment earlier by `on_trash()` would be overwritten by the
+		 * save that trashing itself performs, and the queue would hold an "update"
+		 * carrying a package whose status happens to be `trash`.
+		 *
+		 * Restoring is unaffected: `wp_untrash_post()` fires the same hook with the
+		 * RESTORED status, so a recovered item is queued as the update it is.
+		 */
+		$post = get_post( $attachment_id );
+
+		if ( $post instanceof \WP_Post && 'trash' === $post->post_status ) {
+			return;
+		}
+
+		/*
 		 * SEVERAL ATTACHMENT RECORDS CAN POINT AT ONE FILE — track it once.
 		 *
 		 * Reported as seven pending changes for a single image: seven attachment ids,
@@ -141,7 +159,7 @@ final class AttachmentObserver {
 	 *     }, 10, 2 );
 	 */
 	private function should_track( int $attachment_id ): bool {
-		$track = ! $this->is_generated_size( $attachment_id );
+		$track = ! $this->is_generated_size( $attachment_id ) && ! $this->is_package_file( $attachment_id );
 
 		/**
 		 * Filter whether an attachment is tracked for deployment.
@@ -163,6 +181,60 @@ final class AttachmentObserver {
 		}
 
 		return $track;
+	}
+
+	/**
+	 * Is this an archive or executable rather than content?
+	 *
+	 * Uploading a plugin or theme ZIP was producing a pending change, and that is wrong on
+	 * purpose-grounds rather than merely untidy: **IFS Deploy does not deploy code.** That
+	 * is a deliberate boundary of the whole plugin — code belongs in version control, and
+	 * a deploy that could ship a plugin ZIP to Production would quietly become a way to
+	 * install software on the live site through the content channel.
+	 *
+	 * WordPress's own plugin installer does not create an attachment, so a ZIP that
+	 * reaches here arrived some other way — through the Media Library, or through an
+	 * uploader that routes everything into it. Either way it is not content to deploy.
+	 *
+	 * Matched by MIME first, with an extension fallback because `application/octet-stream`
+	 * is what a server reports when it does not recognise a file — and an unrecognised
+	 * binary is exactly what should not be deployed either.
+	 *
+	 * A site that genuinely publishes a downloadable ZIP can put it back with the
+	 * documented filter:
+	 *
+	 *     add_filter( 'ifs_deploy_track_attachment', function ( $track, $id ) {
+	 *         return get_post_mime_type( $id ) === 'application/zip' ? true : $track;
+	 *     }, 10, 2 );
+	 */
+	private function is_package_file( int $attachment_id ): bool {
+		$mime = strtolower( (string) get_post_mime_type( $attachment_id ) );
+
+		$blocked_mimes = array(
+			'application/zip',
+			'application/x-zip-compressed',
+			'multipart/x-zip',
+			'application/gzip',
+			'application/x-gzip',
+			'application/x-tar',
+			'application/x-bzip2',
+			'application/x-rar-compressed',
+			'application/vnd.rar',
+			'application/x-7z-compressed',
+			'application/java-archive',
+			'application/x-msdownload',
+			'application/x-executable',
+			'application/octet-stream',
+		);
+
+		if ( in_array( $mime, $blocked_mimes, true ) ) {
+			return true;
+		}
+
+		$file      = (string) get_post_meta( $attachment_id, '_wp_attached_file', true );
+		$extension = strtolower( (string) pathinfo( $file, PATHINFO_EXTENSION ) );
+
+		return in_array( $extension, array( 'zip', 'gz', 'tgz', 'tar', 'bz2', 'rar', '7z', 'exe', 'jar', 'phar', 'php' ), true );
 	}
 
 	/**
@@ -419,12 +491,86 @@ final class AttachmentObserver {
 		return '' !== $fallback ? $fallback : 'unknown (no hook dispatch in stack)';
 	}
 
+	/**
+	 * Media moved to Trash — which on many sites is what "delete" actually does.
+	 *
+	 * ── WHY THIS HOOK WAS MISSING, AND WHAT IT COST ────────────────────────────────
+	 *
+	 * `wp_delete_attachment()` begins:
+	 *
+	 *     if ( ! $force_delete && MEDIA_TRASH && EMPTY_TRASH_DAYS ) {
+	 *         return wp_trash_post( $post_id );
+	 *     }
+	 *     do_action( 'delete_attachment', $post_id );
+	 *
+	 * So on a site with `MEDIA_TRASH` enabled, trashing an image returns EARLY and
+	 * `delete_attachment` — the only media hook this class listened to — never fires at
+	 * all. Removing media was simply not tracked: no queue row, nothing to push, and
+	 * nothing on screen to suggest anything was missing.
+	 *
+	 * `wp_trash_post` fires for every post type, so this checks the type itself rather
+	 * than assuming.
+	 *
+	 * The attachment still EXISTS at this point, which is worth more than it sounds: its
+	 * URL and filename can be read and sent with the delete package, so the far side can
+	 * identify it by recorded source URL — the strongest match there is — rather than
+	 * depending on an origin stamp it may never have been given.
+	 */
+	public function on_trash( int $post_id ): void {
+		$post = get_post( $post_id );
+
+		if ( ! $post instanceof \WP_Post || 'attachment' !== $post->post_type ) {
+			return;
+		}
+
+		$this->queue_removal( $post );
+	}
+
 	public function on_delete( int $attachment_id ): void {
 		$post = get_post( $attachment_id );
 		if ( ! $post instanceof \WP_Post || 'attachment' !== $post->post_type ) {
 			return;
 		}
 
-		$this->queue->upsert( 'media', (string) $post->post_mime_type, $attachment_id, $post->post_title, 'delete', md5( 'delete:media:' . $attachment_id ) );
+		/*
+		 * THE SAME RULE AS on_change(), and it was missing here.
+		 *
+		 * Blocking plugin/theme archives on upload but not on delete meant a ZIP that was
+		 * never tracked in the first place still produced a "delete" pending change when it
+		 * was removed — a deploy row proposing to delete something Production had never
+		 * been given. Reported with `ifs-deploy-0.7.0.zip` sitting in Pending Changes.
+		 *
+		 * A half-applied rule is worse than no rule: it looks handled while the other half
+		 * of the object's life goes on producing exactly what it was meant to stop.
+		 */
+		if ( ! $this->should_track( $attachment_id ) ) {
+			return;
+		}
+
+		$this->queue_removal( $post );
+	}
+
+	/**
+	 * Queue "this media is going away", however it is going.
+	 *
+	 * Trash and permanent delete arrive on different hooks, and the difference between
+	 * them DOES travel — but not from here. `DeploymentService::removal_intent()` reads it
+	 * at push time from whether the attachment still exists, which is both simpler than
+	 * threading it through the queue and more accurate: trashing an image and then
+	 * emptying the trash before pushing collapses to one row by hash, and only the final
+	 * state should be sent.
+	 *
+	 * So both hooks queue the same thing on purpose. One method so they cannot drift.
+	 */
+	private function queue_removal( \WP_Post $post ): void {
+		$this->queue->upsert(
+			'media',
+			(string) $post->post_mime_type,
+			(int) $post->ID,
+			(string) $post->post_title,
+			'delete',
+			// Hash the action, so a later re-upload supersedes the removal row.
+			md5( 'delete:media:' . $post->ID )
+		);
 	}
 }

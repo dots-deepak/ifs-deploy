@@ -231,22 +231,51 @@ $ajax = (string) file_get_contents( $root . '/src/Admin/Ajax.php' );
 // It used to return every id for anyone with "see all", so one administrator click deployed
 // every colleague's pending row — including half-finished work.
 ok( 'the wide scope requires an explicit opt-in', false !== strpos( $ajax, "! empty( \$_POST['include_others'] )" ) );
-// A user without "see all" can never widen their scope, whatever the page sends.
-ok( 'and the opt-in still needs the capability', (bool) preg_match( "/include_others'\s*\]\s*\)\s*&&\s*Access::sees_all\(\)/", $ajax ) );
-// Narrowing now applies to administrators too, by default.
-ok( 'ownership narrowing is the default for everyone', (bool) preg_match( '/if \( \$wants_others \) \{\s*return \$ids;\s*\}\s*return \( new QueueRepository\(\) \)->ids_owned_by/s', $ajax ) );
+
+/*
+ * THE EXEMPTION IS ADMINISTRATOR, NOT "see all".
+ *
+ * It used to key off `view_all`, so anyone who could SEE everyone's changes could also
+ * push them. Those are different powers: an editor may legitimately need to review the
+ * whole team's queue without being able to publish a colleague's half-finished page.
+ *
+ * `manage_options` is the exemption, and it exists because the alternative strands work —
+ * someone goes on leave and their approved changes can be pushed by nobody. Even then it
+ * has to be asked for, so an administrator's "Push All" still defaults to their own rows.
+ */
+ok( 'the exemption is manage_options', (bool) preg_match( '/current_user_can\(\s*Access::CAP_MANAGE\s*\)/', $ajax ) );
+ok( 'and view_all no longer grants it', 0 === preg_match( "/include_others'\s*\]\s*\)\s*&&\s*Access::sees_all\(\)/", $ajax ) );
+ok( 'ownership narrowing is the default for everyone', (bool) preg_match( '/\$is_admin && ! empty\( \$_POST\[.include_others.\] \)\s*\)\s*\{\s*return \$ids;/s', $ajax ) );
+
+// And a refusal SAYS SO. Selecting a colleague's row used to end at "No items selected.",
+// which is not what happened and sends the user hunting for a fault in their own selection.
+ok( 'a refused row is reported, not silently dropped', false !== strpos( $ajax, 'You do not have permission to push these changes.' ) );
+ok( 'and the message counts what was refused', (bool) preg_match( '/\$refused = count\( \$ids \) - count\( \$owned \);/', $ajax ) );
+// An administrator gets a different message: theirs is a missing tick, not a missing right.
+ok( 'an administrator is told about the checkbox instead', (bool) preg_match( '/\$is_admin\s*\?\s*sprintf/', $ajax ) );
 
 $pending = (string) file_get_contents( $root . '/src/Admin/Pages/PendingChangesPage.php' );
 
 ok( 'the checkbox is rendered', false !== strpos( $pending, 'ifs-deploy-include-others' ) );
-// Only shown to users who could act on others in the first place.
-ok( 'only for users who can see all changes', (bool) preg_match( '/\$sees_all && current_user_can\( Access::CAP_DEPLOY \)/', $pending ) );
+// Only for administrators now — the server enforces the same rule either way.
+ok( 'only for administrators', (bool) preg_match( '/current_user_can\( Access::CAP_MANAGE \) && current_user_can\( Access::CAP_DEPLOY \)/', $pending ) );
 ok( 'and it defaults to off', false === strpos( $pending, 'id="ifs-deploy-include-others" checked' ) );
 
 $js = (string) file_get_contents( $root . '/assets/js/admin.js' );
 
-ok( 'the flag is sent on push', 2 === substr_count( $js, 'include_others: includeOthers()' ) - substr_count( $js, "ifs_deploy_ignore', { queue_ids: ids, include_others" ) );
-ok( 'and on ignore', false !== strpos( $js, "ifs_deploy_ignore', { queue_ids: ids, include_others: includeOthers()" ) );
+/*
+ * Push Selected and Push All both hand the flag to the batched pusher.
+ *
+ * It has to travel with EVERY batch, not just the first: each batch is its own request,
+ * and `Ajax::queue_ids()` re-checks ownership on all of them — so a batch that arrived
+ * without the flag would have its rows narrowed away mid-push, silently deploying less
+ * than the plan promised.
+ */
+ok( 'both push buttons pass the flag to the planner', 2 === substr_count( $js, 'pushStart( set.ids, includeOthers() )' ) );
+ok( 'the plan request carries it', (bool) preg_match( "/action: 'ifs_deploy_push_plan'.*?include_others: includeOthers/s", $js ) );
+ok( 'and so does every batch', (bool) preg_match( "/action: 'ifs_deploy_push_batch'.*?include_others: push\.includeOthers/s", $js ) );
+ok( 'and the cancel', (bool) preg_match( "/action: 'ifs_deploy_push_cancel'.*?include_others: push\.includeOthers/s", $js ) );
+ok( 'and on ignore', false !== strpos( $js, "ifs_deploy_ignore', { queue_ids: set.ids, include_others: includeOthers()" ) );
 // One helper, so the three actions cannot drift apart on what the flag means.
 ok( 'read through a single helper', 1 === substr_count( $js, 'function includeOthers()' ) );
 
@@ -254,7 +283,31 @@ ok( 'read through a single helper', 1 === substr_count( $js, 'function includeOt
 // saw "12 changes will be pushed" and 3 were pushed.
 ok( 'the row carries its ownership', false !== strpos( $pending, 'data-mine=' ) );
 ok( 'and the browser narrows the count to match', false !== strpos( $js, 'function scoped(' ) );
-ok( 'both selected and all go through it', 2 === substr_count( $js, 'scoped( $( ' ) );
+// Both buttons read the same helper, which returns the narrowed ids AND how many were
+// removed — the count is what lets an empty result be explained instead of ignored.
+// Three: Push Selected, Push All, and Ignore. Ignore narrows by ownership too —
+// `Ajax::ignore()` runs the same check — so it had the same silent failure, and
+// dismissing a colleague's change is no more yours to do than publishing it.
+ok( 'selected, all AND ignore go through it', 3 === substr_count( $js, 'pushable( $( ' ) );
+ok( 'the helper reports what it removed', false !== strpos( $js, "refused: \$items.length - ids.length" ) );
+
+/*
+ * AN EMPTY PUSH IS EXPLAINED, NOT SWALLOWED.
+ *
+ * Push All answered an empty set with a bare `return`: an Editor pressing it on an
+ * administrator's changes got no dialog, no message, and no sign the click had registered.
+ * Push Selected was barely better, saying "Nothing is selected" to someone who had
+ * selected several rows.
+ */
+ok( 'an empty push is explained', false !== strpos( $js, 'function explainEmptyPush(' ) );
+ok( 'and no push handler returns silently', 0 === preg_match( '/var ids = allIds\(\);\s*if \( ! ids\.length \) \{\s*return;/', $js ) );
+// Nothing pending and none-of-it-is-yours are different situations; only the second is a
+// permission problem.
+ok( 'a permission refusal is named as one', false !== strpos( $js, 'IfsDeploy.i18n.pushNotYours' ) );
+ok( 'and that string exists', false !== strpos( (string) file_get_contents( $root . '/src/Admin/Assets.php' ), "'pushNotYours'" ) );
+// A partial refusal is stated BEFORE confirming — pushing 3 of 8 and reporting success is
+// how someone concludes their colleague's work went out with theirs.
+ok( 'a partial refusal is shown in the dialog', (bool) preg_match( '/function pushConfirmBody\( count, refused \)/', $js ) );
 
 /* -----------------------------------------------------------------------------
  * Media race

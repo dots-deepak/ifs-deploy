@@ -147,5 +147,54 @@ echo "\n=== object deleted on Production ===\n";
 $all_new = PackageDiff::compare( $pkg, null, true );
 ok( 'missing object -> everything added', count( $all_new ) > 0 && 'added' === field( $all_new, 'post_title' )['change'] );
 
+echo "\n=== rolling back a CREATE removes what the deploy added ===\n";
+//
+// Reported as "no rollback option for media", but it was never about media: pushing a NEW
+// page had exactly the same gap. Every other snapshot answers "what was here before?", and
+// for something that did not exist there is no before — so nothing was captured, no
+// revision row existed, and History correctly concluded there was nothing to go back to.
+//
+// A deploy that cannot be undone is the one case rollback exists for. The undo of a create
+// is a REMOVAL, and that is what the marker records.
+$store_src = (string) php_strip_whitespace( __DIR__ . '/../src/Rollback/SnapshotStore.php' );
+$import_src = (string) php_strip_whitespace( __DIR__ . '/../src/Import/ImportManager.php' );
+
+ok( 'a creation can be recorded', false !== strpos( $store_src, 'function capture_creation(' ) );
+ok( 'and is recognisable as one', false !== strpos( $store_src, 'CREATED_MARKER' ) );
+ok( 'restore() dispatches it separately', (bool) preg_match( '/CREATED_MARKER\s*\]\s*\).*?undo_creation\(/s', $store_src ) );
+
+// Written AFTER the import, because the object's id here does not exist until it has been
+// created — which is precisely why snapshot_for() could not do it.
+ok( 'the marker is written after the import', (bool) preg_match( '/0 === \$revision_id && \$created && \$object_id > 0/', $import_src ) );
+ok( 'and only when nothing else was captured', false !== strpos( $import_src, '0 === $revision_id' ) );
+
+// Reversible wherever WordPress allows it: a rollback is already the undo button, so
+// making it destroy content outright would leave no way back from a mistaken undo.
+ok( 'a created post goes to Trash', (bool) preg_match( '/wp_trash_post\(\s*\$object_id\s*\)/', $store_src ) );
+ok( 'a created attachment uses the reversible delete', (bool) preg_match( '/wp_delete_attachment\(\s*\$object_id,\s*false\s*\)/', $store_src ) );
+ok( 'a created term is removed with its taxonomy', false !== strpos( $store_src, 'wp_delete_term(' ) );
+ok( 'a created menu is removed', false !== strpos( $store_src, 'wp_delete_nav_menu(' ) );
+
+// Options never reach the marker — capture_option() always produces a revision because it
+// records ABSENCE with a sentinel — so guessing there would be wrong rather than merely
+// unnecessary.
+ok( 'options are refused rather than guessed at', (bool) preg_match( "/case 'option':.*?return false;/s", $store_src ) );
+
+echo "\n=== and the preview says so instead of showing an empty diff ===\n";
+//
+// Falling through to the field comparison would produce an empty field list, which reads
+// as "nothing will change" — the exact opposite of what this rollback does.
+$preview_src = (string) php_strip_whitespace( __DIR__ . '/../src/Rest/RollbackPreviewEndpoint.php' );
+
+ok( 'the preview detects a creation', false !== strpos( $preview_src, 'SnapshotStore::CREATED_MARKER' ) );
+ok( 'and returns before any diffing', (bool) preg_match( '/CREATED_MARKER\s*\]\s*\)\s*\)\s*\{.*?return \$result;/s', $preview_src ) );
+// Whitespace-tolerant: php_strip_whitespace() collapses the alignment padding this file
+// uses, so matching the literal spacing would pin the formatter rather than the rule.
+ok( 'it is not offered as comparable', (bool) preg_match( "/'comparable'\s*=>\s*\(\s*'post' === \\\$type && ! \\\$is_creation\s*\)/", $preview_src ) );
+// Media is removed outright while a page is recoverable from Trash, so the two are not
+// described in the same words.
+ok( 'media says it will be removed', false !== strpos( $preview_src, 'rolling back REMOVES it' ) );
+ok( 'a page says it goes to Trash', false !== strpos( $preview_src, 'moves it to Trash' ) );
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

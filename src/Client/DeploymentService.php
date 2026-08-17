@@ -10,6 +10,7 @@ use IfsDeploy\Export\OptionExporter;
 use IfsDeploy\Export\PostExporter;
 use IfsDeploy\Export\TermExporter;
 use IfsDeploy\History\DeploymentRepository;
+use IfsDeploy\Import\ImportManager;
 use IfsDeploy\Queue\QueueRepository;
 use IfsDeploy\Support\DebugLog;
 
@@ -91,6 +92,251 @@ final class DeploymentService {
 		}
 
 		return $this->dispatch( $objects, $mapped, $user_id );
+	}
+
+	/**
+	 * How many objects one batch carries.
+	 *
+	 * Small on purpose. The point of batching is that no single request has to survive the
+	 * whole push — a hundred media downloads will exceed any server's execution limit —
+	 * and that the browser gets to report progress between requests. A large batch gives
+	 * back both problems.
+	 *
+	 * Media is the expensive type by far (a download and a full set of image sizes each),
+	 * which is why the planner puts media first: those batches are the slow ones, and
+	 * finishing them early makes the remaining estimate honest rather than optimistic.
+	 */
+	private const BATCH_SIZE = 5;
+
+	/**
+	 * Plan a batched push: which rows, in the order Production needs them.
+	 *
+	 * ── WHY THE ORDER IS DECIDED HERE ──────────────────────────────────────────────
+	 *
+	 * `ImportManager` sorts each request it receives into dependency order, which is
+	 * enough when a push IS one request. Split into batches, sorting inside each one only
+	 * orders a batch against itself: a post could be sent in batch 1 and the media it
+	 * references in batch 2, and the post would import first — the exact dependency the
+	 * order exists to prevent.
+	 *
+	 * So the whole push is ordered before anything is split, using
+	 * `ImportManager::rank()` — the same definition Production applies, read from one
+	 * place so the two cannot drift.
+	 *
+	 * ── WHY THE PLAN CARRIES TITLES AND TYPES ──────────────────────────────────────
+	 *
+	 * The browser needs to say what it is doing — "Uploading media…", "Pushing: About
+	 * Us" — and it cannot learn that from a batch's RESPONSE, because by then the batch
+	 * is already finished. Sending the descriptions up front means the dialog can name
+	 * the work as it starts it rather than after it is over.
+	 *
+	 * It also costs nothing extra: these rows are read here anyway to check they are
+	 * still pending.
+	 *
+	 * @param int[] $queue_ids
+	 *
+	 * @return array{uuid:string,batches:array<int,array<int,array{id:int,type:string,title:string}>>,total:int}
+	 */
+	public function plan( array $queue_ids ): array {
+		$rows = array();
+
+		foreach ( $queue_ids as $queue_id ) {
+			$item = $this->queue->get( (int) $queue_id );
+
+			if ( null === $item || QueueRepository::STATUS_PENDING !== $item->status ) {
+				continue;
+			}
+
+			$rows[] = $item;
+		}
+
+		// Stable within a type: PHP's sort is stable, so the queue's own order (most
+		// recently edited first) is preserved inside each group.
+		usort(
+			$rows,
+			static fn( object $a, object $b ): int =>
+				ImportManager::rank( (string) $a->object_type ) <=> ImportManager::rank( (string) $b->object_type )
+		);
+
+		$items = array_map(
+			static fn( object $row ): array => array(
+				'id'    => (int) $row->id,
+				'type'  => (string) $row->object_type,
+				'title' => (string) $row->object_title,
+			),
+			$rows
+		);
+
+		return array(
+			'uuid'    => wp_generate_uuid4(),
+			'batches' => array_chunk( $items, self::BATCH_SIZE ),
+			'total'   => count( $items ),
+		);
+	}
+
+	/**
+	 * Send ONE batch of an already-planned push.
+	 *
+	 * Every batch carries the same uuid, so Production files them all under one
+	 * deployment — see ImportManager::run(), where that is what keeps rollback able to
+	 * restore the whole push rather than only its last part.
+	 *
+	 * Locks are taken and released PER BATCH rather than held across the whole push. A
+	 * transient lock cannot be handed from one HTTP request to the next without either
+	 * leaking on a crash or being re-acquired anyway, and the property that actually
+	 * matters is unchanged: two people cannot have the same object in flight at the same
+	 * moment. What is lost is only that a conflict may now be discovered part-way through
+	 * rather than before anything is sent — which is why the message says so.
+	 *
+	 * @param int[] $queue_ids Ids for THIS batch, from plan().
+	 *
+	 * @return array{ok:bool,message:string,uuid:string,status:string,results:int}
+	 */
+	public function deploy_batch( string $uuid, array $queue_ids, int $user_id ): array {
+		$objects = array();
+		$mapped  = array();
+
+		foreach ( $queue_ids as $queue_id ) {
+			$item = $this->queue->get( (int) $queue_id );
+
+			if ( null === $item || QueueRepository::STATUS_PENDING !== $item->status ) {
+				continue;
+			}
+
+			$package = $this->build_package( $item );
+
+			if ( null === $package ) {
+				DebugLog::error(
+					'Could not build a deployment package',
+					array(
+						'queue_id' => (int) $item->id,
+						'type'     => (string) $item->object_type,
+						'objectid' => (int) $item->object_id,
+						'title'    => (string) $item->object_title,
+					)
+				);
+
+				$this->queue->set_status( (int) $item->id, QueueRepository::STATUS_FAILED );
+				continue;
+			}
+
+			$objects[] = $package;
+
+			$mapped[ self::map_key( (string) $item->object_type, (int) $item->object_id ) ] = (int) $item->id;
+		}
+
+		if ( empty( $objects ) ) {
+			// Not an error: rows can have been resolved or ignored between planning and
+			// sending. The push simply has nothing to do for this slice.
+			return array(
+				'ok'      => true,
+				'message' => '',
+				'uuid'    => $uuid,
+				'status'  => DeploymentRepository::STATUS_PENDING,
+				'results' => 0,
+			);
+		}
+
+		$lock  = new DeployLock();
+		$claim = $lock->acquire( $this->lock_targets( $objects ) );
+
+		if ( ! $claim['ok'] ) {
+			DeployLock::note_conflict( $claim['blocked'] );
+
+			return array(
+				'ok'      => false,
+				'message' => $this->conflict_message( $claim['blocked'] ),
+				'uuid'    => $uuid,
+				'status'  => DeploymentRepository::STATUS_FAILED,
+				'results' => 0,
+			);
+		}
+
+		foreach ( $this->lock_targets( $objects ) as $target ) {
+			$lock->note_owner( (string) $target['type'], (int) $target['id'], $user_id );
+		}
+
+		try {
+			$response = $this->client->post(
+				'import',
+				array(
+					'deployment_uuid' => $uuid,
+					'objects'         => $objects,
+				)
+			);
+
+			if ( is_wp_error( $response ) ) {
+				return array(
+					'ok'      => false,
+					'message' => $this->transport_message( $response ),
+					'uuid'    => $uuid,
+					'status'  => DeploymentRepository::STATUS_FAILED,
+					'results' => 0,
+				);
+			}
+
+			$body    = (array) $response['body'];
+			$results = is_array( $body['results'] ?? null ) ? $body['results'] : array();
+
+			$this->apply_results( $results, $mapped );
+
+			$failed = false;
+
+			foreach ( $results as $result ) {
+				if ( empty( $result['ok'] ) ) {
+					$failed = true;
+					break;
+				}
+			}
+
+			return array(
+				'ok'        => 200 === $response['status'] && ! $failed,
+				'message'   => $failed ? $this->failure_message( $response, $results ) : '',
+				'uuid'      => $uuid,
+				'status'    => (string) ( $body['status'] ?? DeploymentRepository::STATUS_PENDING ),
+				'results'   => count( $results ),
+				'conflicts' => self::id_conflicts( $results ),
+			);
+		} finally {
+			$lock->release_all();
+		}
+	}
+
+	/**
+	 * Media ID conflicts picked out of a batch's results, so the browser can offer to fix
+	 * them instead of only reporting them.
+	 *
+	 * Production refuses to create a new attachment at an id it has already given away,
+	 * because this plugin copies meta verbatim and ACF fields, galleries and `wp-image-N`
+	 * classes all store the bare number. That refusal is the honest outcome, but on its own
+	 * it leaves the operator with a sentence and no way forward — and the site that can
+	 * still act is this one, not Production.
+	 *
+	 * Only this specific code is extracted. Every other failure stays prose, because
+	 * nothing here can offer a button for it.
+	 *
+	 * @param array $results Per-object results as returned by Production.
+	 * @return array<int,array{origin_id:int,title:string,message:string,occupant:array}>
+	 */
+	public static function id_conflicts( array $results ): array {
+		$conflicts = array();
+
+		foreach ( $results as $result ) {
+			if ( 'ifs_deploy_media_id_taken' !== (string) ( $result['code'] ?? '' ) ) {
+				continue;
+			}
+
+			$data = (array) ( $result['data'] ?? array() );
+
+			$conflicts[] = array(
+				'origin_id' => (int) ( $result['origin_id'] ?? 0 ),
+				'title'     => (string) ( $result['title'] ?? '' ),
+				'message'   => (string) ( $result['error'] ?? '' ),
+				'occupant'  => (array) ( $data['occupant'] ?? array() ),
+			);
+		}
+
+		return $conflicts;
 	}
 
 	/**
@@ -288,6 +534,79 @@ final class DeploymentService {
 	}
 
 	/**
+	 * Stop a push part-way and undo whatever it had already applied.
+	 *
+	 * Batching means a cancel can land after some objects are live on Production, so
+	 * "cancel" cannot just mean "stop sending". Production reverts them, and this puts the
+	 * queue rows back where they were.
+	 *
+	 * THE ROWS STAY PENDING, deliberately. A cancelled push is a decision to not publish
+	 * yet — not a decision to discard the work. Clearing the rows would silently destroy
+	 * what someone had queued; leaving them pending means the user decides afterwards
+	 * whether to push again or ignore them.
+	 *
+	 * @param int[] $queue_ids Rows already marked deployed by completed batches.
+	 *
+	 * @return array{ok:bool,message:string}
+	 */
+	public function cancel( string $uuid, array $queue_ids ): array {
+		$response = $this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
+
+		/*
+		 * The queue is restored EVEN IF the remote call failed.
+		 *
+		 * If Production could not be reached, the safest assumption is that its state is
+		 * unknown — and an unknown state must leave the row pending rather than deployed.
+		 * `restore_pending()` also clears `deployed_hash`, so nothing later treats the row
+		 * as already-pushed. Erring the other way would drop someone's work out of Pending
+		 * Changes on the strength of a request that never arrived.
+		 */
+		$restored = $this->queue->restore_pending( $queue_ids );
+
+		if ( is_wp_error( $response ) ) {
+			return array(
+				'ok'      => false,
+				'message' => sprintf(
+					/* translators: %s: underlying transport error */
+					__( 'The push was stopped, but Production could not be reached to undo what had already been sent (%s). Check Deployment History on Production and roll that deployment back if part of it is live. Your changes are still listed here.', 'ifs-deploy' ),
+					$response->get_error_message()
+				),
+			);
+		}
+
+		$body = (array) ( $response['body'] ?? array() );
+
+		if ( 200 !== (int) $response['status'] || empty( $body['ok'] ) ) {
+			return array(
+				'ok'      => false,
+				'message' => (string) ( $body['error'] ?? __( 'The push was stopped, but Production did not confirm the undo. Check Deployment History there. Your changes are still listed here.', 'ifs-deploy' ) ),
+			);
+		}
+
+		if ( ! empty( $body['nothing_applied'] ) ) {
+			return array(
+				'ok'      => true,
+				'message' => __( 'Push cancelled. Nothing had reached Production yet, so nothing needed undoing — your changes are still listed here.', 'ifs-deploy' ),
+			);
+		}
+
+		return array(
+			'ok'      => true,
+			'message' => sprintf(
+				/* translators: 1: objects reverted on Production, 2: rows returned to the list */
+				_n(
+					'Push cancelled. %1$d change already sent was undone on Production, and %2$d item is still listed here.',
+					'Push cancelled. %1$d changes already sent were undone on Production, and %2$d items are still listed here.',
+					(int) ( $body['restored'] ?? 0 ),
+					'ifs-deploy'
+				),
+				(int) ( $body['restored'] ?? 0 ),
+				$restored
+			),
+		);
+	}
+
+	/**
 	 * Request rollback of a prior deployment on Production.
 	 *
 	 * @return array{ok:bool,message:string}
@@ -387,14 +706,33 @@ final class DeploymentService {
 		}
 
 		if ( 'media' === $type ) {
+			/*
+			 * A TRASHED attachment still exists, so it can still be described.
+			 *
+			 * This used to send an empty source URL and no filename, which left
+			 * `MediaImporter::find_existing()` with only the origin stamp to go on — so
+			 * media that reached Production any other way could never be matched, and the
+			 * removal silently did nothing.
+			 *
+			 * On a site with `MEDIA_TRASH` enabled — where removing media means trashing
+			 * it — the attachment is still readable at push time, and the recorded source
+			 * URL is the strongest match the importer has. A permanently deleted one is
+			 * gone and these stay empty, which is the old behaviour and is reported
+			 * honestly rather than passing as a success.
+			 */
+			$attachment = get_post( (int) $item->object_id );
+			$exists     = $attachment instanceof \WP_Post;
+
 			return array(
 				'format'      => MediaExporter::PACKAGE_FORMAT,
 				'type'        => 'media',
 				'subtype'     => (string) $item->object_subtype,
 				'action'      => 'delete',
+				'removal'     => self::removal_intent( (int) $item->object_id ),
 				'origin_id'   => (int) $item->object_id,
 				'origin_site' => $origin_site,
-				'source_url'  => '',
+				'source_url'  => $exists ? (string) wp_get_attachment_url( (int) $attachment->ID ) : '',
+				'filename'    => $exists ? basename( (string) get_attached_file( (int) $attachment->ID ) ) : '',
 			);
 		}
 
@@ -403,12 +741,105 @@ final class DeploymentService {
 			'type'        => 'post',
 			'subtype'     => (string) $item->object_subtype,
 			'action'      => 'delete',
+			'removal'     => self::removal_intent( (int) $item->object_id ),
 			'origin_id'   => (int) $item->object_id,
 			'origin_site' => $origin_site,
-			'object'      => array(
-				'post_title' => (string) $item->object_title,
-				'post_type'  => (string) $item->object_subtype,
+			'object'      => array_merge(
+				array(
+					'post_title' => (string) $item->object_title,
+					'post_type'  => (string) $item->object_subtype,
+				),
+				// Slug and date when the post can still be read, which is most of the time.
+				$this->delete_identity( (int) $item->object_id )
 			),
+		);
+	}
+
+	/**
+	 * Was this object TRASHED here, or permanently DESTROYED? Production is told which.
+	 *
+	 * ── WHY THE INTENT HAS TO TRAVEL ───────────────────────────────────────────────
+	 *
+	 * The delete package used to say only "remove this" and let the far side decide how,
+	 * on the reasoning that a deploy should not impose one site's settings on the other.
+	 * That reasoning was wrong, and it is why trashing media on Staging destroyed it on
+	 * Production.
+	 *
+	 * `MEDIA_TRASH` DEFAULTS TO FALSE — `wp-includes/default-constants.php` defines it
+	 * that way when wp-config.php does not. So a Staging site with media trash switched on
+	 * paired with an ordinary Production site meant `wp_delete_attachment( $id, false )`
+	 * fell straight through to a permanent delete. The operator trashed a file expecting
+	 * to be able to change their mind, pushed, and the file was gone from the live site
+	 * with no trash entry to restore from.
+	 *
+	 * "Recoverable" is a property of the ACTION the operator took, not of the receiving
+	 * site's configuration. Trash here means trash there.
+	 *
+	 * ── WHY IT IS INFERRED HERE RATHER THAN RECORDED AT HOOK TIME ──────────────────
+	 *
+	 * The queue row carries no room for it, and it does not need to: an object that still
+	 * exists at push time was trashed, and one that is gone was destroyed. Reading it here
+	 * is also MORE accurate than recording it when the hook fired, because the two can
+	 * happen in sequence — trash an image, then empty the trash before pushing. The row is
+	 * superseded by hash, so only the final state is ever pushed, and this reports that
+	 * final state rather than whichever hook happened to fire first.
+	 *
+	 * Anything still present that is NOT trashed (restored after the row was written, say)
+	 * is reported as a trash: the recoverable reading is the safe one when the two sites
+	 * disagree about what happened.
+	 *
+	 * @return string 'trash'|'delete'
+	 */
+	public static function removal_intent( int $object_id ): string {
+		return get_post( $object_id ) instanceof \WP_Post ? 'trash' : 'delete';
+	}
+
+	/**
+	 * Extra identifying fields for a delete, read from the post if it still exists.
+	 *
+	 * ── WHY A DELETE NEEDED MORE TO GO ON ──────────────────────────────────────────
+	 *
+	 * A delete package used to carry only the title and the post type. `PostImporter`
+	 * resolves its target by origin stamp, then id parity, then slug — and with no slug
+	 * the third strategy could never run, while the second had nothing but the title to
+	 * corroborate itself with. So a page whose title had been edited before it was
+	 * deleted, or one on a site that was cloned rather than deployed to, simply could not
+	 * be found and the deletion did not happen.
+	 *
+	 * A TRASHED post is still readable, which covers the ordinary case: WordPress trashes
+	 * before it deletes, and most deletions never go further than that. A permanently
+	 * deleted one is gone, and then this returns nothing and the old behaviour stands —
+	 * the honest failure in `PostImporter::delete_post()` reports it either way.
+	 *
+	 * ── THE `__trashed` TRAP ───────────────────────────────────────────────────────
+	 *
+	 * `wp_trash_post()` RENAMES the slug, appending `__trashed`, so that the URL is freed
+	 * for a replacement page. Sending that would be worse than sending nothing: it can
+	 * match nothing on Production, and it looks like a legitimate slug while doing it.
+	 * Core keeps the original in `_wp_desired_post_slug`, so that is preferred, with the
+	 * suffix stripped as a fallback for posts trashed by something that did not set it.
+	 *
+	 * @return array<string,string>
+	 */
+	private function delete_identity( int $post_id ): array {
+		$post = get_post( $post_id );
+
+		if ( ! $post instanceof \WP_Post ) {
+			return array();
+		}
+
+		$slug    = (string) $post->post_name;
+		$desired = (string) get_post_meta( $post_id, '_wp_desired_post_slug', true );
+
+		if ( '' !== $desired ) {
+			$slug = $desired;
+		} elseif ( '__trashed' === substr( $slug, -9 ) ) {
+			$slug = substr( $slug, 0, -9 );
+		}
+
+		return array(
+			'post_name' => $slug,
+			'post_date' => (string) $post->post_date,
 		);
 	}
 
@@ -423,6 +854,39 @@ final class DeploymentService {
 		$results = is_array( $body['results'] ?? null ) ? $body['results'] : array();
 		$status  = (string) ( $body['status'] ?? DeploymentRepository::STATUS_FAILED );
 
+		$this->apply_results( $results, $mapped );
+
+		$this->deployments->update( $deployment_id, $status, $results );
+
+		$ok = DeploymentRepository::STATUS_FAILED !== $status && 200 === $response['status'];
+
+		if ( $ok ) {
+			return array(
+				'ok'      => true,
+				'message' => __( 'Deployment complete.', 'ifs-deploy' ),
+				'uuid'    => $uuid,
+				'status'  => $status,
+			);
+		}
+
+		return array(
+			'ok'      => false,
+			'message' => $this->failure_message( $response, $results ),
+			'uuid'    => $uuid,
+			'status'  => $status,
+		);
+	}
+
+	/**
+	 * Mark each queue row with what Production said about its object.
+	 *
+	 * Shared by the single-request path and the batched one, so a row cannot be resolved
+	 * one way by one and another way by the other.
+	 *
+	 * @param array             $results Per-object results from Production.
+	 * @param array<string,int> $mapped  "type|object_id" => queue_id
+	 */
+	private function apply_results( array $results, array $mapped ): void {
 		foreach ( $results as $result ) {
 			/*
 			 * Keyed by TYPE AND ID, because an id alone is not unique across types.
@@ -450,26 +914,6 @@ final class DeploymentService {
 				$this->queue->set_status( $queue_id, QueueRepository::STATUS_FAILED );
 			}
 		}
-
-		$this->deployments->update( $deployment_id, $status, $results );
-
-		$ok = DeploymentRepository::STATUS_FAILED !== $status && 200 === $response['status'];
-
-		if ( $ok ) {
-			return array(
-				'ok'      => true,
-				'message' => __( 'Deployment complete.', 'ifs-deploy' ),
-				'uuid'    => $uuid,
-				'status'  => $status,
-			);
-		}
-
-		return array(
-			'ok'      => false,
-			'message' => $this->failure_message( $response, $results ),
-			'uuid'    => $uuid,
-			'status'  => $status,
-		);
 	}
 
 	/**

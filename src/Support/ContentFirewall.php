@@ -154,6 +154,30 @@ final class ContentFirewall {
 
 		$removed = self::describe( $html, $clean );
 
+		/*
+		 * RE-SERIALISATION IS NOT A REMOVAL.
+		 *
+		 * kses does not hand back the string it was given even when it keeps everything:
+		 * it rebuilds every tag, so attribute order, quoting and spacing can all change
+		 * while the markup is identical in meaning. The entity check above catches one
+		 * form of that; this catches the rest.
+		 *
+		 * Reported as a change, it produced a WARNING on every single deploy of the same
+		 * page, reading "Removed disallowed markup" while removing nothing — which is
+		 * worse than silence twice over. It is alarming and untrue, and a warning that
+		 * cries wolf on every push is one nobody reads when it finally means something.
+		 *
+		 * `describe()` now returns an empty list only when nothing was taken out at all:
+		 * no tag, no attribute, no text. Anything genuinely dropped is named.
+		 */
+		if ( empty( $removed ) ) {
+			return array(
+				'html'    => self::MODE_FILTER === self::mode() ? $clean : $html,
+				'changed' => false,
+				'removed' => array(),
+			);
+		}
+
 		// report mode returns the ORIGINAL. The caller stores it untouched; only the log
 		// records what filter mode would have done.
 		return array(
@@ -423,13 +447,117 @@ final class ContentFirewall {
 			}
 		}
 
-		if ( empty( $removed ) ) {
-			// Something changed that none of the patterns name — an unlisted attribute,
-			// most likely. Say so rather than reporting "nothing", which would read as a
-			// bug in the reporting.
-			$removed[] = 'disallowed markup';
+		if ( ! empty( $removed ) ) {
+			return $removed;
 		}
 
-		return $removed;
+		/*
+		 * None of the security patterns matched, so name what ACTUALLY went.
+		 *
+		 * This used to give up here and report the catch-all "disallowed markup", which
+		 * was both unactionable and — far more often — untrue: kses rebuilds every tag it
+		 * keeps, so an identical page comes back as a different string. The result was a
+		 * WARNING on every deploy of the same page, naming nothing.
+		 *
+		 * Counting tags and attributes on both sides answers it properly. A stripped
+		 * `srcset` now reads as `srcset`, and a page that merely got re-serialised
+		 * produces an empty list, which apply() treats as no change at all.
+		 */
+		foreach ( self::tag_counts( $before ) as $tag => $was ) {
+			$is = self::tag_counts( $after )[ $tag ] ?? 0;
+
+			if ( $was > $is ) {
+				$removed[] = '<' . $tag . '>' . self::times( $was - $is );
+			}
+		}
+
+		$after_attributes = self::attribute_counts( $after );
+
+		foreach ( self::attribute_counts( $before ) as $attribute => $was ) {
+			$is = $after_attributes[ $attribute ] ?? 0;
+
+			if ( $was > $is ) {
+				$removed[] = $attribute . self::times( $was - $is );
+			}
+		}
+
+		if ( ! empty( $removed ) ) {
+			return $removed;
+		}
+
+		/*
+		 * Last resort: the visible words.
+		 *
+		 * A tag can be dropped along with everything inside it while the tag counts still
+		 * balance — `<form>` removed with its `<input>`s, say. Comparing the text with all
+		 * markup and whitespace normalised away catches that without being fooled by
+		 * reformatting.
+		 */
+		if ( self::text_of( $before ) !== self::text_of( $after ) ) {
+			return array( 'text content' );
+		}
+
+		return array();
+	}
+
+	/** " (×3)", or "" for a single occurrence. */
+	private static function times( int $count ): string {
+		return $count > 1 ? ' (×' . $count . ')' : '';
+	}
+
+	/**
+	 * How many times each tag NAME appears.
+	 *
+	 * @return array<string,int>
+	 */
+	private static function tag_counts( string $html ): array {
+		$counts = array();
+
+		if ( preg_match_all( '#<\s*([a-z][a-z0-9]*)\b#i', $html, $matches ) ) {
+			foreach ( $matches[1] as $tag ) {
+				$tag            = strtolower( $tag );
+				$counts[ $tag ] = ( $counts[ $tag ] ?? 0 ) + 1;
+			}
+		}
+
+		return $counts;
+	}
+
+	/**
+	 * How many times each attribute NAME appears, counted only INSIDE tags.
+	 *
+	 * Scoped to tags on purpose: prose contains `x = 1` often enough, and counting that
+	 * as an attribute would report phantom removals whenever a sentence changed.
+	 *
+	 * @return array<string,int>
+	 */
+	private static function attribute_counts( string $html ): array {
+		$counts = array();
+
+		if ( ! preg_match_all( '#<[a-z][^>]*>#i', $html, $tags ) ) {
+			return $counts;
+		}
+
+		foreach ( $tags[0] as $tag ) {
+			if ( ! preg_match_all( '#\s([a-z_:][-a-z0-9_:.]*)\s*=#i', $tag, $attributes ) ) {
+				continue;
+			}
+
+			foreach ( $attributes[1] as $attribute ) {
+				$attribute            = strtolower( $attribute );
+				$counts[ $attribute ] = ( $counts[ $attribute ] ?? 0 ) + 1;
+			}
+		}
+
+		return $counts;
+	}
+
+	/**
+	 * The visible words, with markup, entities and whitespace normalised away.
+	 */
+	private static function text_of( string $html ): string {
+		$text = html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' );
+
+		return trim( (string) preg_replace( '#\s+#u', ' ', $text ) );
 	}
 }

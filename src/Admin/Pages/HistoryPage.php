@@ -115,7 +115,19 @@ final class HistoryPage {
 	private function can_rollback( object $deployment, array $log ): bool {
 		$status = (string) $deployment->deployment_status;
 
-		if ( in_array( $status, array( DeploymentRepository::STATUS_FAILED, DeploymentRepository::STATUS_ROLLED_BACK, DeploymentRepository::STATUS_PENDING ), true ) ) {
+		// CANCELLED is here for the same reason as ROLLED_BACK: its snapshots were already
+		// applied and then deleted, so a Rollback button would offer to re-apply the very
+		// state the cancel undid.
+		if ( in_array(
+			$status,
+			array(
+				DeploymentRepository::STATUS_FAILED,
+				DeploymentRepository::STATUS_ROLLED_BACK,
+				DeploymentRepository::STATUS_CANCELLED,
+				DeploymentRepository::STATUS_PENDING,
+			),
+			true
+		) ) {
 			return false;
 		}
 
@@ -169,6 +181,9 @@ final class HistoryPage {
 			DeploymentRepository::STATUS_SUCCESS     => array( __( 'Success', 'ifs-deploy' ), 'success' ),
 			DeploymentRepository::STATUS_PARTIAL     => array( __( 'Partial', 'ifs-deploy' ), 'partial' ),
 			DeploymentRepository::STATUS_FAILED      => array( __( 'Failed', 'ifs-deploy' ), 'failed' ),
+			// Stopped part-way and everything it had applied was put back. One line, not a
+			// deploy followed by an undo of it.
+			DeploymentRepository::STATUS_CANCELLED  => array( __( 'Cancelled', 'ifs-deploy' ), 'failed' ),
 			DeploymentRepository::STATUS_PENDING     => array( __( 'Pending', 'ifs-deploy' ), '' ),
 			DeploymentRepository::STATUS_ROLLED_BACK => array( __( 'Rolled Back', 'ifs-deploy' ), 'rolledback' ),
 		);

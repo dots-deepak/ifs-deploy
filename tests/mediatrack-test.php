@@ -44,9 +44,19 @@ function apply_filters( $tag, $value, ...$args ) {
 	return $value;
 }
 
+/**
+ * `post_status` and `post_type` are read from the fixtures, not hard-coded.
+ *
+ * They were fixed values, and both rules added for the trash flow turn on them: the guard
+ * that stops `edit_attachment` overwriting a delete row reads the STATUS, and `on_trash()`
+ * checks the TYPE because `wp_trash_post` fires for every post type. A stub that always
+ * answered "attachment" and never answered a status made both untestable — and made them
+ * look like they passed.
+ */
 class WP_Post {
 	public $ID;
 	public $post_type   = 'attachment';
+	public $post_status = 'inherit';
 	public $post_title  = '';
 	public $post_name   = '';
 	public $post_excerpt = '';
@@ -55,7 +65,13 @@ class WP_Post {
 	public $post_parent = 0;
 	public $menu_order  = 0;
 	public $post_date   = '2026-08-11 01:52:01';
-	public function __construct( $id, $title ) { $this->ID = $id; $this->post_title = $title; $this->post_name = $title; }
+	public function __construct( $id, $title ) {
+		$this->ID          = $id;
+		$this->post_title  = $title;
+		$this->post_name   = $title;
+		$this->post_status = $GLOBALS['statuses'][ (int) $id ] ?? 'inherit';
+		$this->post_type   = $GLOBALS['types'][ (int) $id ] ?? 'attachment';
+	}
 }
 
 $GLOBALS['files']    = array();   // attachment id => relative file path
@@ -66,6 +82,7 @@ $GLOBALS['options']  = array();
 // `inherit` is the normal status for an attachment; the live site that prompted this had
 // duplicates in some OTHER status, which is why the canonical choice has to cope with it.
 function get_post_status( $id ) { return $GLOBALS['statuses'][ (int) $id ] ?? 'inherit'; }
+function get_post_mime_type( $id ) { return $GLOBALS['mimes'][ (int) $id ] ?? 'image/png'; }
 
 function get_post( $id = null ) {
 	$id = (int) $id;
@@ -168,12 +185,15 @@ function reset_all(): void {
 	$GLOBALS['files']    = array();
 	$GLOBALS['titles']   = array();
 	$GLOBALS['statuses'] = array();
+	$GLOBALS['mimes']    = array();
+	$GLOBALS['types']    = array();
 	$GLOBALS['wpdb']     = new FakeWpdb();
 }
-function attachment( int $id, string $file, string $title = 'test', string $status = 'inherit' ): void {
+function attachment( int $id, string $file, string $title = 'test', string $status = 'inherit', string $mime = 'image/png' ): void {
 	$GLOBALS['files'][ $id ]    = $file;
 	$GLOBALS['titles'][ $id ]   = $title;
 	$GLOBALS['statuses'][ $id ] = $status;
+	$GLOBALS['mimes'][ $id ]    = $mime;
 }
 function rows(): int { return count( $GLOBALS['wpdb']->rows ); }
 
@@ -354,6 +374,93 @@ attachment( 63826, '2026/08/banner-1920x1080.jpg', 'banner' );
 $observer->on_change( 63826 );
 ok( 'with a sibling present -> skipped', 0 === rows() );
 
+echo "\n=== a plugin or theme ZIP is not content ===\n";
+//
+// Reported outright: uploading a plugin ZIP produced a pending change. That is wrong on
+// purpose-grounds, not merely untidy — IFS DEPLOY DOES NOT DEPLOY CODE. A deploy that
+// could carry a plugin ZIP to Production would quietly become a way to install software
+// on the live site through the content channel.
+reset_all();
+attachment( 70001, '2026/08/akismet.zip', 'akismet', 'inherit', 'application/zip' );
+$observer->on_change( 70001 );
+ok( 'a ZIP is not tracked', 0 === rows() );
+
+foreach (
+	array(
+		'application/x-zip-compressed' => '2026/08/plugin.zip',
+		'application/x-gzip'           => '2026/08/backup.gz',
+		'application/x-tar'            => '2026/08/archive.tar',
+		'application/java-archive'     => '2026/08/thing.jar',
+		'application/x-msdownload'     => '2026/08/setup.exe',
+	) as $mime => $file
+) {
+	reset_all();
+	attachment( 70002, $file, 'thing', 'inherit', $mime );
+	$observer->on_change( 70002 );
+	ok( "$mime is not tracked", 0 === rows() );
+}
+
+// `application/octet-stream` is what a server reports when it does not recognise a file,
+// and an unrecognised binary is exactly what should not be deployed either.
+reset_all();
+attachment( 70003, '2026/08/mystery.bin', 'mystery', 'inherit', 'application/octet-stream' );
+$observer->on_change( 70003 );
+ok( 'an unrecognised binary is not tracked', 0 === rows() );
+
+// Extension fallback, for when the MIME is reported as something harmless.
+reset_all();
+attachment( 70004, '2026/08/theme.zip', 'theme', 'inherit', 'text/plain' );
+$observer->on_change( 70004 );
+ok( 'the extension is checked even when the MIME is not archive-like', 0 === rows() );
+
+// And real content is entirely unaffected.
+foreach (
+	array(
+		'image/png'       => '2026/08/photo.png',
+		'image/jpeg'      => '2026/08/photo.jpg',
+		'application/pdf' => '2026/08/brochure.pdf',
+		'video/mp4'       => '2026/08/clip.mp4',
+	) as $mime => $file
+) {
+	reset_all();
+	attachment( 70005, $file, 'content', 'inherit', $mime );
+	$observer->on_change( 70005 );
+	ok( "$mime IS tracked", 1 === rows() );
+}
+
+/*
+ * AND THE SAME RULE ON DELETE, which is where it was missing.
+ *
+ * Blocking archives on upload but not on delete meant a ZIP that had never been tracked
+ * still produced a "delete" pending change when it was removed — a row proposing to delete
+ * from Production something Production was never given. Reported with
+ * `ifs-deploy-0.7.0.zip` sitting in Pending Changes.
+ *
+ * A half-applied rule is worse than no rule: it looks handled while the other half of the
+ * object's life goes on producing exactly what it was meant to stop.
+ */
+reset_all();
+attachment( 70007, '2026/08/ifs-deploy-0.7.0.zip', 'ifs-deploy-0.7.0', 'inherit', 'application/zip' );
+$observer->on_delete( 70007 );
+ok( 'deleting a ZIP queues nothing either', 0 === rows() );
+
+// Deleting real media still queues, or the rule would have eaten a genuine deletion.
+reset_all();
+attachment( 70008, '2026/08/photo.png', 'photo', 'inherit', 'image/png' );
+$observer->on_delete( 70008 );
+ok( 'but deleting an image still does', 1 === rows() );
+ok( 'as a delete', 'delete' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+
+// A site that genuinely publishes a downloadable ZIP can put it back.
+reset_all();
+attachment( 70006, '2026/08/resources.zip', 'resources', 'inherit', 'application/zip' );
+add_filter( 'ifs_deploy_track_attachment', function ( $track, $id ) {
+	return 70006 === (int) $id ? true : $track;
+}, 10, 2 );
+$observer->on_change( 70006 );
+ok( 'the filter can put a ZIP back', 1 === rows() );
+remove_all_filters( 'ifs_deploy_track_attachment' );
+
 echo "\n=== the escape hatch for whatever else a site produces ===\n";
 reset_all();
 attachment( 63827, '2026/08/generated.png', 'generated' );
@@ -368,6 +475,85 @@ ok( 'the filter can exclude an attachment', 0 === rows() );
 remove_all_filters( 'ifs_deploy_track_attachment' );
 $observer->on_change( 63827 );
 ok( 'and without it the same attachment is tracked', 1 === rows() );
+
+echo "\n=== media moved to TRASH is tracked, not ignored ===\n";
+//
+// THE GAP THIS CLOSES. `wp_delete_attachment()` begins:
+//
+//     if ( ! $force_delete && MEDIA_TRASH && EMPTY_TRASH_DAYS ) {
+//         return wp_trash_post( $post_id );
+//     }
+//     do_action( 'delete_attachment', $post_id );
+//
+// So on a site with MEDIA_TRASH enabled — where "delete" means "move to Trash" — the hook
+// this observer listened to NEVER FIRED. Removing media produced no queue row at all: no
+// error, nothing to push, and nothing on screen to suggest anything was missing.
+reset_all();
+attachment( 71001, '2026/08/photo.png', 'photo', 'inherit', 'image/png' );
+
+$observer->on_trash( 71001 );
+ok( 'trashing media queues a removal', 1 === rows() );
+ok( 'as a delete', 'delete' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+
+// wp_trash_post fires for EVERY post type, so the observer has to check the type itself
+// rather than assume the hook only ever brings it attachments.
+reset_all();
+attachment( 71002, '2026/08/whatever.html', 'A page', 'publish', 'text/html' );
+$GLOBALS['types'][71002] = 'page';
+$observer->on_trash( 71002 );
+ok( 'but trashing a PAGE through the same hook is ignored', 0 === rows() );
+
+echo "\n=== and the save that trashing performs cannot overwrite it ===\n";
+//
+// Exactly the trap PostObserver has: wp_trash_post() finishes by calling wp_update_post(),
+// which fires `edit_attachment`. Without a guard the delete row written a moment earlier
+// is replaced by an "update" carrying a package whose status happens to be `trash`.
+reset_all();
+attachment( 71003, '2026/08/photo.png', 'photo', 'inherit', 'image/png' );
+
+$observer->on_trash( 71003 );
+$GLOBALS['statuses'][71003] = 'trash';   // what wp_trash_post has just done
+$observer->on_change( 71003 );           // the edit_attachment that follows it
+
+ok( 'still one row', 1 === rows() );
+ok( 'and it is still a delete', 'delete' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+
+// Restoring must go back to being an ordinary update — wp_untrash_post() fires the same
+// hook with the RESTORED status.
+$GLOBALS['statuses'][71003] = 'inherit';
+$observer->on_change( 71003 );
+ok( 'restoring queues it as an update again', 'update' === (string) reset( $GLOBALS['wpdb']->rows )->action );
+
+echo "\n=== a removal package describes the file while it still can ===\n";
+//
+// A trashed attachment still EXISTS, so its URL and filename can be read and sent. Without
+// them the far side had only the origin stamp to match on, so media that reached Production
+// any other way could never be found and the removal silently did nothing.
+$service_media = (string) php_strip_whitespace( __DIR__ . '/../src/Client/DeploymentService.php' );
+
+ok( 'the source URL is sent when readable', false !== strpos( $service_media, "wp_get_attachment_url( (int) \$attachment->ID )" ) );
+ok( 'and the filename with it', false !== strpos( $service_media, "basename( (string) get_attached_file( (int) \$attachment->ID ) )" ) );
+ok( 'a permanently deleted one sends neither', (bool) preg_match( "/\\\$exists \?.*?: ''/s", $service_media ) );
+
+/*
+ * THE INTENT TRAVELS, and the receiver obeys it.
+ *
+ * This used to assert the opposite — `wp_delete_attachment( $existing, false )`, letting
+ * the receiving site decide what removal meant. That is what destroyed files people
+ * expected to be able to restore: `MEDIA_TRASH` DEFAULTS TO FALSE, so on any Production
+ * that had not explicitly enabled media trash, `force = false` fell straight through to a
+ * permanent delete while the deploy reported success.
+ */
+$service_src  = (string) php_strip_whitespace( __DIR__ . '/../src/Client/DeploymentService.php' );
+$importer_src = (string) php_strip_whitespace( __DIR__ . '/../src/Import/MediaImporter.php' );
+
+ok( 'the package says which kind of removal it was', false !== strpos( $service_src, "'removal'" ) );
+ok( 'read from whether the object still exists', (bool) preg_match( '/removal_intent.*?instanceof \\\\WP_Post \? \'trash\' : \'delete\'/s', $service_src ) );
+ok( 'a trash on Staging trashes on Production', (bool) preg_match( '/wp_trash_post\(\s*\$existing\s*\)/', $importer_src ) );
+ok( 'and does NOT go through MEDIA_TRASH to do it', false === strpos( $importer_src, 'wp_delete_attachment( $existing, false )' ) );
+ok( 'a permanent delete forces', (bool) preg_match( '/wp_delete_attachment\(\s*\$existing,\s*true\s*\)/', $importer_src ) );
+ok( 'an absent intent is read as the recoverable one', (bool) preg_match( "/'delete' !== \(\s*\\\$package\['removal'\] \?\? 'trash'\s*\)/", $importer_src ) );
+ok( 'a trashed attachment is still findable here', (bool) preg_match( "/'inherit',\s*'trash'/", $importer_src ) );
 
 echo "\n=== every decision is logged, so a live site can be diagnosed ===\n";
 //

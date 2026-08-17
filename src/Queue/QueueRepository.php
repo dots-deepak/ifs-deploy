@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Queue;
 
+use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\Schema;
 
 /**
@@ -46,6 +47,54 @@ final class QueueRepository {
 		// One row per object means this records the LAST person to touch it, which is
 		// the right answer for "whose pending change is this?".
 		$user_id = get_current_user_id();
+
+		/*
+		 * NO LOGGED-IN USER, NO PENDING CHANGE.
+		 *
+		 * The queue exists so a team can review what THEY changed before pushing it. A row
+		 * with no author cannot be reviewed in that sense — nobody knows what it is or
+		 * whether it was meant — and on a live site these arrived from background work
+		 * nobody had asked about: cron, WP-CLI, an async cleanup. They showed as
+		 * "Changed By: Unknown" and were pure noise.
+		 *
+		 * Gated HERE rather than in each observer on purpose. This is the single point
+		 * every content type passes through — posts, terms, options, media, menus — so the
+		 * rule cannot apply to four of them and be forgotten for the fifth.
+		 *
+		 * THE COST, stated plainly: a genuine content change made by a script or by
+		 * WP-CLI is now silently not queued. A site that does edit content that way can
+		 * put it back:
+		 *
+		 *     add_filter( 'ifs_deploy_track_without_user', '__return_true' );
+		 *
+		 * The filter is only consulted when there is no user, so the ordinary path costs
+		 * nothing — and the skip is logged (behind Detailed logging) so a change that goes
+		 * missing this way can still be found.
+		 */
+		if ( 0 === $user_id ) {
+			/**
+			 * Track changes made with no logged-in user (cron, WP-CLI, importers)?
+			 *
+			 * @param bool   $track     False by default.
+			 * @param string $type      Object type.
+			 * @param int    $object_id Object id.
+			 */
+			if ( ! apply_filters( 'ifs_deploy_track_without_user', false, $type, $object_id ) ) {
+				DebugLog::debug(
+					'Change ignored: no logged-in user made it',
+					array(
+						'type'      => $type,
+						'subtype'   => $subtype,
+						'object_id' => $object_id,
+						'title'     => $title,
+						'action'    => $action,
+						'hook'      => function_exists( 'current_filter' ) ? (string) current_filter() : '',
+					)
+				);
+
+				return false;
+			}
+		}
 
 		if ( $existing ) {
 			// Already queued with the same content and still pending → skip.
@@ -382,6 +431,40 @@ final class QueueRepository {
 	 * should never have had one, so leaving it behind under any status would still put it
 	 * in front of someone.
 	 */
+	/**
+	 * Point this object's queue rows at a new id, because the object itself moved.
+	 *
+	 * Only `MediaIdResolver` does this, when it renumbers an attachment to resolve an id
+	 * conflict with Production. The rows have to follow: they are the pending change the
+	 * operator is trying to push, and a row naming an id that no longer exists would build
+	 * a package for a missing attachment — failing with something much less clear than the
+	 * conflict the renumber was meant to fix.
+	 *
+	 * Rows already pushed are moved too. Their `deployed_hash` still describes this file,
+	 * and leaving history behind under a dead id would make the next change to it look
+	 * like a first deploy.
+	 *
+	 * @return int Rows moved.
+	 */
+	public function repoint( string $type, int $from, int $to ): int {
+		global $wpdb;
+
+		if ( $from === $to || $from <= 0 || $to <= 0 ) {
+			return 0;
+		}
+
+		return (int) $wpdb->update(
+			Schema::queue_table(),
+			array( 'object_id' => $to ),
+			array(
+				'object_type' => $type,
+				'object_id'   => $from,
+			),
+			array( '%d' ),
+			array( '%s', '%d' )
+		);
+	}
+
 	public function forget( string $type, int $object_id ): void {
 		global $wpdb;
 
@@ -469,6 +552,44 @@ final class QueueRepository {
 
 		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
 			$wpdb->prepare( "DELETE FROM {$table} WHERE id IN ({$placeholders})", $remove ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+	}
+
+	/**
+	 * Put rows back to pending after a push was cancelled and reverted.
+	 *
+	 * `deployed_hash` is CLEARED, not restored to what it was before this push.
+	 *
+	 * That looks lossy and is the right answer. The column means "what Production last
+	 * accepted", and after a cancel we no longer know: the revert put Production back to
+	 * some earlier state that this site never recorded. Leaving the just-deployed hash
+	 * there would be an outright lie — the object would look already-pushed and could drop
+	 * out of Pending Changes on the next save, which is precisely what the user asked not
+	 * to happen.
+	 *
+	 * Empty means "unknown", every rule that reads it fails closed on that, and
+	 * `Client\QueueVerifier` re-establishes the truth from Production on the next render.
+	 *
+	 * @param int[] $ids
+	 */
+	public function restore_pending( array $ids ): int {
+		global $wpdb;
+
+		$ids = array_values( array_filter( array_map( 'absint', $ids ) ) );
+
+		if ( empty( $ids ) ) {
+			return 0;
+		}
+
+		$table        = Schema::queue_table();
+		$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+
+		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
+			$wpdb->prepare(
+				// phpcs:ignore WordPress.DB.PreparedSQL
+				"UPDATE {$table} SET status = %s, deployed_hash = '', updated_at = %s WHERE id IN ({$placeholders})",
+				array_merge( array( self::STATUS_PENDING, current_time( 'mysql' ) ), $ids )
+			)
 		);
 	}
 

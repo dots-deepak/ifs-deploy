@@ -2,16 +2,626 @@
 ( function ( $ ) {
 	'use strict';
 
-	function notify( message, isError ) {
-		var cls = isError ? 'notice-error' : 'notice-success';
-		var $n = $( '#ifs-deploy-notice, #ifs-deploy-test-result' ).first();
-		var html = '<div class="notice ' + cls + ' is-dismissible"><p>' + message + '</p></div>';
-		if ( $( '#ifs-deploy-notice' ).length ) {
-			$( '#ifs-deploy-notice' ).html( html );
-		} else {
-			$( '#ifs-deploy-test-result' ).text( message );
+	/*
+	 * Toast notifications.
+	 *
+	 * These used to be a wp-admin notice written into a container near the top of the
+	 * panel. Two things were wrong with that. It sat wherever the page happened to be
+	 * scrolled from — after pushing from a long Pending Changes table the result appeared
+	 * off-screen entirely — and several of these actions RELOAD the page, so the notice
+	 * was destroyed a moment after it appeared.
+	 *
+	 * A toast fixes the first by being positioned against the viewport, and the second by
+	 * surviving the reload (see the queue below).
+	 *
+	 * Errors do NOT auto-dismiss. A success message that disappears has been read or does
+	 * not matter; an error that disappears takes the only account of what went wrong with
+	 * it — and these actions fail for reasons the user needs to act on ("Production
+	 * returned HTTP 500", "another user is pushing this page").
+	 */
+	var TOAST_KEY = 'ifsDeployToasts';
+	var SUCCESS_MS = 6000;
+
+	function toastHost() {
+		var $host = $( '#ifs-deploy-toasts' );
+
+		if ( ! $host.length ) {
+			$host = $( '<div id="ifs-deploy-toasts" class="ifs-deploy-toasts"></div>' ).appendTo( 'body' );
+		}
+
+		return $host;
+	}
+
+	function showToast( message, isError ) {
+		if ( ! message ) {
+			return;
+		}
+
+		var $toast = $( '<div class="ifs-deploy-toast"></div>' )
+			.addClass( isError ? 'is-error' : 'is-success' )
+			/*
+			 * assertive + alert for failures so a screen reader interrupts with them, polite
+			 * + status for successes so it does not talk over whatever the user is doing.
+			 */
+			.attr( 'role', isError ? 'alert' : 'status' )
+			.attr( 'aria-live', isError ? 'assertive' : 'polite' );
+
+		// .text(), never .html(): these strings pass through server messages that can quote
+		// a filename, a post title or a raw response body from the other site.
+		$( '<p class="ifs-deploy-toast-text"></p>' ).text( message ).appendTo( $toast );
+
+		$( '<button type="button" class="ifs-deploy-toast-close" aria-label="' + IfsDeploy.i18n.close + '">&times;</button>' )
+			.appendTo( $toast );
+
+		toastHost().append( $toast );
+
+		// Next frame, so the element is in the document before the transition starts —
+		// otherwise it is applied to an element that was never in its "from" state.
+		window.setTimeout( function () {
+			$toast.addClass( 'is-visible' );
+		}, 10 );
+
+		if ( ! isError ) {
+			window.setTimeout( function () {
+				dismissToast( $toast );
+			}, SUCCESS_MS );
 		}
 	}
+
+	function dismissToast( $toast ) {
+		$toast.removeClass( 'is-visible' );
+		window.setTimeout( function () {
+			$toast.remove();
+		}, 200 );
+	}
+
+	/**
+	 * Show a message, optionally carrying it across a page reload.
+	 *
+	 * `persist` is for the actions that reload: the toast is stashed and re-shown once the
+	 * new page is up, so the result of a push is still readable afterwards rather than
+	 * flashing for a moment and being torn down with the DOM.
+	 */
+	function notify( message, isError, persist ) {
+		if ( persist ) {
+			queueToast( message, isError );
+			return;
+		}
+
+		showToast( message, isError );
+	}
+
+	function queueToast( message, isError ) {
+		try {
+			var queued = JSON.parse( window.sessionStorage.getItem( TOAST_KEY ) || '[]' );
+			queued.push( { message: message, error: !! isError } );
+			window.sessionStorage.setItem( TOAST_KEY, JSON.stringify( queued ) );
+		} catch ( e ) {
+			// Private browsing, or storage full. Showing it now is worse than showing it
+			// after the reload, but it beats losing the message.
+			showToast( message, isError );
+		}
+	}
+
+	/**
+	 * Turn any server-rendered result marker into a toast.
+	 *
+	 * Saving settings posts a real form, so its outcome is decided during render — long
+	 * after `admin_enqueue_scripts` has passed, which is why it cannot simply be localised
+	 * into this script. PHP emits a hidden `.ifs-deploy-flash` element instead and this
+	 * converts it, so a save reports itself in exactly the same voice as every AJAX action
+	 * rather than in WordPress's.
+	 *
+	 * Run on load AND after a panel swap, because the AJAX tab loader replaces the markup
+	 * without a page load ever happening.
+	 */
+	function drainFlashes() {
+		$( '.ifs-deploy-flash' ).each( function () {
+			var $flash = $( this );
+
+			showToast( $flash.text(), '1' === String( $flash.attr( 'data-error' ) ) );
+
+			// Removed, or switching away and back would replay a message about something
+			// that happened two screens ago.
+			$flash.remove();
+		} );
+	}
+
+	function drainToasts() {
+		var queued;
+
+		try {
+			queued = JSON.parse( window.sessionStorage.getItem( TOAST_KEY ) || '[]' );
+			window.sessionStorage.removeItem( TOAST_KEY );
+		} catch ( e ) {
+			return;
+		}
+
+		$.each( queued, function ( _, item ) {
+			showToast( item.message, item.error );
+		} );
+	}
+
+	$( document ).on( 'click', '.ifs-deploy-toast-close', function () {
+		dismissToast( $( this ).closest( '.ifs-deploy-toast' ) );
+	} );
+
+	// Escape clears them all. The preview and confirm dialogs handle their own Escape and
+	// stop propagation, so this cannot close a toast out from under an open dialog.
+	$( document ).on( 'keydown', function ( e ) {
+		if ( e.key === 'Escape' ) {
+			$( '.ifs-deploy-toast' ).each( function () {
+				dismissToast( $( this ) );
+			} );
+		}
+	} );
+
+	/*
+	 * Actions whose result can only be seen after the page is rebuilt.
+	 *
+	 * ONE list, so every one of them behaves identically: the toast is stashed, the page
+	 * reloads, the toast reappears. Rollback used to reload from its own handler with its
+	 * own delay while `request()` showed a non-persisted toast — so the one action people
+	 * most want confirmation of was the one whose confirmation was destroyed a moment
+	 * after it appeared. Adding a name here is now the whole of what that takes.
+	 */
+	/**
+	 * Report a result and rebuild the page — the ONLY place that reloads.
+	 *
+	 * The toast is stashed first so it reappears afterwards; showing it and then
+	 * destroying it with the DOM is the bug this pairing exists to prevent, and keeping
+	 * the two steps together is what stops them being separated again. The batched push
+	 * needs exactly the same ending, so it calls this rather than repeating it.
+	 */
+	function reloadWith( message, isError ) {
+		notify( message, isError, true );
+
+		setTimeout( function () {
+			window.location.reload();
+		}, 300 );
+	}
+
+	var RELOAD_ACTIONS = [
+		'ifs_deploy_deploy',
+		'ifs_deploy_deploy_posts',
+		'ifs_deploy_ignore',
+		'ifs_deploy_rollback',
+		'ifs_deploy_sync_ids',
+		'ifs_deploy_clear_history',
+		'ifs_deploy_clear_log'
+	];
+
+	/* ===========================================================================
+	 * Batched push, with real progress
+	 * ---------------------------------------------------------------------------
+	 * A push used to be ONE blocking request: the browser sent everything and waited,
+	 * so there was nothing to report from inside it and nothing to do but spin. Worse,
+	 * a large push had to survive the server's execution limit in a single request —
+	 * a hundred media downloads never will.
+	 *
+	 * The browser now drives it. `push_plan` returns the work already ordered the way
+	 * Production needs it (media first, options last), split into batches; each batch
+	 * is its own short request; the bar moves between them because the browser
+	 * genuinely knows how many are done.
+	 *
+	 * The percentage is therefore REAL. Nothing here estimates or animates towards a
+	 * number it has not been told.
+	 * ======================================================================== */
+
+	var push = null;
+
+	/* ========================================================================
+	 * Media ID conflict
+	 * ---------------------------------------------------------------------------
+	 * Production refuses to create a new attachment at an id it has already given
+	 * away, because this plugin copies meta verbatim and ACF fields, galleries and
+	 * `wp-image-N` classes all store the bare attachment number. Landing the file on
+	 * a different id would leave every one of those references pointing elsewhere —
+	 * which is what used to happen, silently.
+	 *
+	 * Refusing is honest but not enough on its own: the operator gets a sentence and
+	 * no way forward, and the site that can still act is THIS one. So the refusal is
+	 * turned into a dialog that asks Staging whether the file is safe to move, and
+	 * offers the move only when it provably is.
+	 *
+	 * The "is it safe" question is asked BEFORE the button is drawn, never after.
+	 * Offering an action and then refusing it is how a dialog loses trust.
+	 * ======================================================================== */
+
+	function idConflictDialog( conflict ) {
+		$( '#ifs-deploy-idconflict' ).remove();
+
+		var occupant = conflict.occupant || {};
+
+		var $d = $(
+			'<div id="ifs-deploy-idconflict" class="ifs-deploy-progress" role="dialog" aria-modal="true" aria-labelledby="ifs-deploy-idconflict-title">' +
+				'<div class="ifs-deploy-progress-box ifs-deploy-conflict">' +
+					'<h2 id="ifs-deploy-idconflict-title" class="ifs-deploy-progress-title"></h2>' +
+					'<dl class="ifs-deploy-conflict-facts"></dl>' +
+					'<p class="ifs-deploy-conflict-why"></p>' +
+					'<p class="ifs-deploy-conflict-verdict" role="status" aria-live="polite"></p>' +
+					'<p class="ifs-deploy-progress-actions">' +
+						'<button type="button" class="button button-primary" id="ifs-deploy-idconflict-go" hidden></button>' +
+						'<button type="button" class="button" id="ifs-deploy-idconflict-close"></button>' +
+					'</p>' +
+				'</div>' +
+			'</div>'
+		).appendTo( 'body' );
+
+		$d.find( '.ifs-deploy-progress-title' ).text( IfsDeploy.i18n.conflictTitle );
+		$d.find( '.ifs-deploy-conflict-why' ).text( conflict.message || '' );
+		$d.find( '#ifs-deploy-idconflict-close' ).text( IfsDeploy.i18n.conflictCancel );
+		$d.find( '.ifs-deploy-conflict-verdict' ).text( IfsDeploy.i18n.conflictChecking );
+
+		var facts = [
+			[ IfsDeploy.i18n.conflictMedia, conflict.title || '' ],
+			[ IfsDeploy.i18n.conflictStagingId, String( conflict.origin_id || '' ) ],
+			[
+				IfsDeploy.i18n.conflictProdId,
+				occupant.id
+					? IfsDeploy.i18n.conflictTakenBy
+						.replace( '%1$s', occupant.type || '' )
+						.replace( '%2$s', occupant.title || '' )
+					: IfsDeploy.i18n.conflictNotAvailable
+			]
+		];
+
+		var $facts = $d.find( '.ifs-deploy-conflict-facts' );
+
+		$.each( facts, function ( _, row ) {
+			$( '<dt></dt>' ).text( row[0] ).appendTo( $facts );
+			$( '<dd></dd>' ).text( row[1] ).appendTo( $facts );
+		} );
+
+		$d.on( 'click', '#ifs-deploy-idconflict-close', function () {
+			$d.remove();
+		} );
+
+		// Ask whether it can be moved at all. Only a file nothing refers to yet can be,
+		// and when it cannot, the answer names what is using it.
+		$.post( IfsDeploy.ajaxUrl, {
+			action: 'ifs_deploy_media_id_inspect',
+			nonce: IfsDeploy.nonce,
+			attachment_id: conflict.origin_id
+		} )
+			.done( function ( res ) {
+				if ( ! res || ! res.success ) {
+					$d.find( '.ifs-deploy-conflict-verdict' ).text(
+						( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError
+					);
+					return;
+				}
+
+				$d.find( '.ifs-deploy-conflict-verdict' ).text( res.data.message || '' );
+
+				if ( ! res.data.can_renumber ) {
+					return;
+				}
+
+				$d.find( '#ifs-deploy-idconflict-go' )
+					.text( IfsDeploy.i18n.conflictGenerate.replace( '%d', res.data.new_id ) )
+					.prop( 'hidden', false )
+					.on( 'click', function () {
+						var $go = $( this ).prop( 'disabled', true );
+
+						$go.text( IfsDeploy.i18n.conflictWorking );
+
+						$.post( IfsDeploy.ajaxUrl, {
+							action: 'ifs_deploy_media_id_renumber',
+							nonce: IfsDeploy.nonce,
+							attachment_id: conflict.origin_id
+						} )
+							.done( function ( out ) {
+								$d.remove();
+
+								if ( out && out.success ) {
+									// Reloaded, because the pending row now names a different
+									// attachment id and the list on screen still shows the old one.
+									reloadWith( out.data.message, false );
+									return;
+								}
+
+								notify( ( out && out.data && out.data.message ) || IfsDeploy.i18n.genericError, true );
+							} )
+							.fail( function () {
+								$d.remove();
+								notify( IfsDeploy.i18n.genericError, true );
+							} );
+					} );
+			} )
+			.fail( function () {
+				$d.find( '.ifs-deploy-conflict-verdict' ).text( IfsDeploy.i18n.genericError );
+			} );
+	}
+
+	function pushDialog() {
+		var $d = $( '#ifs-deploy-push-progress' );
+
+		if ( ! $d.length ) {
+			$d = $(
+				'<div id="ifs-deploy-push-progress" class="ifs-deploy-progress" role="dialog" aria-modal="true" aria-labelledby="ifs-deploy-progress-title">' +
+					'<div class="ifs-deploy-progress-box">' +
+						'<h2 id="ifs-deploy-progress-title" class="ifs-deploy-progress-title"></h2>' +
+						'<div class="ifs-deploy-progress-track"><div class="ifs-deploy-progress-bar"></div></div>' +
+						'<p class="ifs-deploy-progress-count" role="status" aria-live="polite"></p>' +
+						'<p class="ifs-deploy-progress-phase"></p>' +
+						'<p class="ifs-deploy-progress-item"></p>' +
+						'<p class="ifs-deploy-progress-note"></p>' +
+						'<p class="ifs-deploy-progress-actions">' +
+							'<button type="button" class="button" id="ifs-deploy-push-cancel"></button>' +
+						'</p>' +
+					'</div>' +
+				'</div>'
+			).appendTo( 'body' );
+		}
+
+		return $d;
+	}
+
+	/** What kind of work a batch of this type is, in words the user recognises. */
+	function pushPhase( type ) {
+		var phases = {
+			media: IfsDeploy.i18n.pushPhaseMedia,
+			term: IfsDeploy.i18n.pushPhaseTerm,
+			post: IfsDeploy.i18n.pushPhasePost,
+			menu: IfsDeploy.i18n.pushPhaseMenu,
+			option: IfsDeploy.i18n.pushPhaseOption
+		};
+
+		return phases[ type ] || IfsDeploy.i18n.pushPhaseOther;
+	}
+
+	/**
+	 * How much longer, from how long it has actually taken so far.
+	 *
+	 * ── WHY THIS IS NOT ONE AVERAGE ────────────────────────────────────────────────
+	 *
+	 * Types are wildly unequal: a media item downloads a file and regenerates every image
+	 * size, while an option is a single row. A flat average over completed items would
+	 * therefore be badly wrong in the one direction that matters — the plan puts media
+	 * FIRST, so an average taken during the slow part would go on being applied to the
+	 * fast remainder and promise far more time than is left.
+	 *
+	 * So time is measured per TYPE and the remainder is priced with its own type's
+	 * average, falling back to the overall average for a type not seen yet. The estimate
+	 * therefore drops sharply when the media is done — which is what actually happens.
+	 *
+	 * Returns '' until at least one batch has completed. There is nothing to base a
+	 * number on before that, and inventing one is exactly what makes a progress dialog
+	 * untrustworthy.
+	 */
+	function pushEta() {
+		var remaining = 0;
+		var overall = null;
+		var totalMs = 0;
+		var totalItems = 0;
+		var type;
+
+		for ( type in push.spent ) {
+			if ( Object.prototype.hasOwnProperty.call( push.spent, type ) ) {
+				totalMs += push.spent[ type ].ms;
+				totalItems += push.spent[ type ].items;
+			}
+		}
+
+		if ( ! totalItems ) {
+			return '';
+		}
+
+		overall = totalMs / totalItems;
+
+		$.each( push.batches, function ( _, batch ) {
+			$.each( batch, function ( __, item ) {
+				var seen = push.spent[ item.type ];
+
+				remaining += seen && seen.items ? seen.ms / seen.items : overall;
+			} );
+		} );
+
+		var seconds = Math.round( remaining / 1000 );
+
+		if ( seconds <= 0 ) {
+			return IfsDeploy.i18n.pushEtaAlmost;
+		}
+
+		if ( seconds < 60 ) {
+			return IfsDeploy.i18n.pushEtaSeconds.replace( '%d', seconds );
+		}
+
+		return IfsDeploy.i18n.pushEtaMinutes.replace( '%d', Math.ceil( seconds / 60 ) );
+	}
+
+	function pushRender() {
+		var $d = pushDialog();
+		var percent = push.total ? Math.round( ( push.done / push.total ) * 100 ) : 0;
+
+		$d.find( '.ifs-deploy-progress-title' ).text( IfsDeploy.i18n.pushTitle );
+		$d.find( '.ifs-deploy-progress-bar' ).css( 'width', percent + '%' );
+		$d.find( '.ifs-deploy-progress-count' ).text(
+			IfsDeploy.i18n.pushProgress
+				.replace( '%1$d', push.done )
+				.replace( '%2$d', push.total )
+				.replace( '%3$d', percent )
+		);
+
+		// While cancelling, the phase and item lines describe work that is no longer
+		// happening — the note replaces them rather than sitting under them.
+		$d.find( '.ifs-deploy-progress-phase' ).text( push.cancelling ? '' : push.phase || '' );
+		$d.find( '.ifs-deploy-progress-item' ).text( push.cancelling ? '' : push.item || '' );
+		$d.find( '.ifs-deploy-progress-note' ).text( push.cancelling ? push.note : ( push.note || pushEta() ) );
+
+		$d.find( '#ifs-deploy-push-cancel' ).text( IfsDeploy.i18n.pushCancel ).prop( 'disabled', !! push.cancelling );
+	}
+
+	function pushClose() {
+		pushDialog().remove();
+		push = null;
+	}
+
+	function pushNext() {
+		if ( ! push || push.cancelling ) {
+			return;
+		}
+
+		if ( ! push.batches.length ) {
+			var done = push.done;
+			pushClose();
+			reloadWith( IfsDeploy.i18n.pushDone.replace( '%d', done ), false );
+			return;
+		}
+
+		var batch = push.batches.shift();
+		var startedAt = ( new Date() ).getTime();
+
+		/*
+		 * Named BEFORE the request, not after it.
+		 *
+		 * The plan carries each item's type and title precisely so this line can describe
+		 * work that is about to happen. Waiting for the response would mean the dialog
+		 * only ever names things it has already finished — which is no use during the
+		 * long batch, which is the one people are watching.
+		 *
+		 * The batch is one request, so the items in it are in flight together; saying
+		 * "and N more" is honest where naming a single one would not be.
+		 */
+		push.phase = pushPhase( batch[0].type );
+		push.item = batch.length > 1
+			? IfsDeploy.i18n.pushItemMore.replace( '%1$s', batch[0].title ).replace( '%2$d', batch.length - 1 )
+			: batch[0].title;
+
+		pushRender();
+
+		$.post( IfsDeploy.ajaxUrl, {
+			action: 'ifs_deploy_push_batch',
+			nonce: IfsDeploy.nonce,
+			uuid: push.uuid,
+			queue_ids: $.map( batch, function ( item ) {
+				return item.id;
+			} ),
+			include_others: push.includeOthers
+		} )
+			.done( function ( res ) {
+				if ( ! push || push.cancelling ) {
+					return;
+				}
+
+				if ( ! res || ! res.success ) {
+					/*
+					 * STOP on the first failing batch rather than carrying on.
+					 *
+					 * Continuing would pile more changes onto a Production that has already
+					 * rejected one, and bury the message that says why under later ones. The
+					 * push is left where it stopped — what succeeded stays, and the failure
+					 * is on screen with the rows still listed.
+					 */
+					var conflicts = ( res && res.data && res.data.conflicts ) || [];
+
+					pushClose();
+
+					// A media ID clash is the ONE failure this site can still do something
+					// about, so it gets a dialog with a button instead of a toast with a
+					// sentence. Everything else stays prose, because nothing here could
+					// offer an action for it.
+					if ( conflicts.length ) {
+						idConflictDialog( conflicts[0] );
+						return;
+					}
+
+					reloadWith( ( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError, true );
+					return;
+				}
+
+				// Timed per TYPE, because a media batch and an options batch are not
+				// comparable work — see pushEta().
+				var spent = push.spent[ batch[0].type ] || { ms: 0, items: 0 };
+
+				spent.ms += ( new Date() ).getTime() - startedAt;
+				spent.items += batch.length;
+				push.spent[ batch[0].type ] = spent;
+
+				push.done += batch.length;
+				pushRender();
+				pushNext();
+			} )
+			.fail( function () {
+				if ( ! push || push.cancelling ) {
+					return;
+				}
+
+				pushClose();
+				notify( IfsDeploy.i18n.genericError, true );
+			} );
+	}
+
+	function pushStart( ids, includeOthers ) {
+		$.post( IfsDeploy.ajaxUrl, {
+			action: 'ifs_deploy_push_plan',
+			nonce: IfsDeploy.nonce,
+			queue_ids: ids,
+			include_others: includeOthers
+		} )
+			.done( function ( res ) {
+				if ( ! res || ! res.success ) {
+					notify( ( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError, true );
+					return;
+				}
+
+				push = {
+					uuid: res.data.uuid,
+					batches: res.data.batches,
+					// Every id, so a cancel can put them all back — including the ones
+					// already marked deployed by batches that completed.
+					all: ids,
+					includeOthers: includeOthers,
+					total: res.data.total,
+					done: 0,
+					phase: '',
+					item: '',
+					note: '',
+					// Milliseconds and item counts per object type, which is what the
+					// estimate is derived from. Empty until a batch has finished, so no
+					// number is shown before there is one to show.
+					spent: {},
+					cancelling: false
+				};
+
+				pushRender();
+				pushNext();
+			} )
+			.fail( function () {
+				notify( IfsDeploy.i18n.genericError, true );
+			} );
+	}
+
+	$( document ).on( 'click', '#ifs-deploy-push-cancel', function () {
+		if ( ! push || push.cancelling ) {
+			return;
+		}
+
+		// Marked before the request so no further batch is sent while the undo runs.
+		push.cancelling = true;
+		push.note = IfsDeploy.i18n.pushCancelling;
+		pushRender();
+
+		$.post( IfsDeploy.ajaxUrl, {
+			action: 'ifs_deploy_push_cancel',
+			nonce: IfsDeploy.nonce,
+			uuid: push.uuid,
+			queue_ids: push.all,
+			include_others: push.includeOthers
+		} )
+			.done( function ( res ) {
+				pushClose();
+				reloadWith(
+					( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError,
+					! ( res && res.success )
+				);
+			} )
+			.fail( function () {
+				pushClose();
+				notify( IfsDeploy.i18n.genericError, true );
+			} );
+	} );
 
 	function request( action, data, $btn ) {
 		var original = $btn ? $btn.text() : '';
@@ -25,11 +635,12 @@
 		)
 			.done( function ( res ) {
 				if ( res && res.success ) {
-					notify( res.data.message, false );
-					if ( action === 'ifs_deploy_deploy' || action === 'ifs_deploy_ignore' ) {
-						setTimeout( function () {
-							window.location.reload();
-						}, 900 );
+					var reloads = $.inArray( action, RELOAD_ACTIONS ) !== -1;
+
+					if ( reloads ) {
+						reloadWith( res.data.message, false );
+					} else {
+						notify( res.data.message, false );
 					}
 				} else {
 					notify( ( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError, true );
@@ -73,20 +684,46 @@
 		} );
 	}
 
-	function selectedIds() {
-		return scoped( $( '.ifs-deploy-item:checked' ) )
+	/**
+	 * What this user may actually push out of a set of rows, and what was left out.
+	 *
+	 * ── THE BUG THIS REPLACED ──────────────────────────────────────────────────────
+	 *
+	 * `allIds()` returned only the scoped ids, so an Editor looking at an administrator's
+	 * changes got an EMPTY array — and the Push All handler answered an empty array with a
+	 * bare `return`. Clicking the button did nothing at all: no dialog, no message, no
+	 * indication the click had even registered. Push Selected was barely better, saying
+	 * "Nothing is selected" to someone who had selected several rows.
+	 *
+	 * Reporting the count that was removed is what turns both into an answerable question:
+	 * an empty result because there is nothing pending is a different situation from an
+	 * empty result because none of it is yours, and only the second is a permission
+	 * problem. The server enforces the rule either way — this decides what to SAY.
+	 */
+	function pushable( $items ) {
+		var ids = scoped( $items )
 			.map( function () {
 				return $( this ).val();
 			} )
 			.get();
+
+		return { ids: ids, total: $items.length, refused: $items.length - ids.length };
 	}
 
-	function allIds() {
-		return scoped( $( '.ifs-deploy-item' ) )
-			.map( function () {
-				return $( this ).val();
-			} )
-			.get();
+	/**
+	 * Explain an empty push, and return true when there is nothing to do.
+	 *
+	 * `emptyMessage` is what to say when the set really is empty; anything removed by
+	 * ownership is a permission problem and says so instead.
+	 */
+	function explainEmptyPush( set, emptyMessage ) {
+		if ( set.ids.length ) {
+			return false;
+		}
+
+		notify( set.refused ? IfsDeploy.i18n.pushNotYours : emptyMessage, true );
+
+		return true;
 	}
 
 	// --- Tabs ------------------------------------------------------------------
@@ -143,8 +780,21 @@
 		setActiveTab( slug );
 		$p.addClass( 'is-loading' ).attr( 'aria-busy', 'true' );
 
-		// A tab switch invalidates any notice from the previous tab's actions.
+		/*
+		 * A tab switch invalidates any message from the previous tab's actions.
+		 *
+		 * `#ifs-deploy-notice` is the container the old inline notices were written into.
+		 * Nothing writes to it any more — everything goes through the toast — but it is
+		 * still emitted by Screen.php, so clearing it stays here as a no-op that costs
+		 * nothing and cannot leave a stale notice behind if anything ever uses it again.
+		 */
 		$( '#ifs-deploy-notice' ).empty();
+
+		// Toasts belong to the action that produced them, not to the screen; a tab switch
+		// means the user has moved on, so they go too.
+		$( '.ifs-deploy-toast' ).each( function () {
+			dismissToast( $( this ) );
+		} );
 
 		$.post( IfsDeploy.ajaxUrl, {
 			action: 'ifs_deploy_tab',
@@ -309,19 +959,28 @@
 	}
 
 	/** "Are you sure…" plus how many items are involved. */
-	function pushConfirmBody( count ) {
+	function pushConfirmBody( count, refused ) {
 		var $wrap = $( '<div></div>' );
 		$( '<p></p>' ).text( IfsDeploy.i18n.confirmPushBody ).appendTo( $wrap );
 		$( '<p class="description"></p>' )
 			.text( IfsDeploy.i18n.confirmPushCount.replace( '%d', count ) )
 			.appendTo( $wrap );
+
+		// Said BEFORE confirming, not after. Quietly pushing 3 of 8 and reporting success
+		// is how someone concludes their colleague's work went out with theirs.
+		if ( refused ) {
+			$( '<p class="description"></p>' )
+				.text( IfsDeploy.i18n.pushExcluded.replace( '%d', refused ) )
+				.appendTo( $wrap );
+		}
+
 		return $wrap.html();
 	}
 
-	function confirmPush( count, onConfirm ) {
+	function confirmPush( count, onConfirm, refused ) {
 		openConfirm( {
 			title: IfsDeploy.i18n.confirmPushTitle,
-			html: pushConfirmBody( count ),
+			html: pushConfirmBody( count, refused || 0 ),
 			text: IfsDeploy.i18n.confirmPushBody,
 			confirmLabel: IfsDeploy.i18n.confirmPushButton,
 			onConfirm: onConfirm
@@ -384,41 +1043,59 @@
 	} );
 
 	$( function () {
+		// Anything stashed by an action that reloaded the page, shown now that the new
+		// page is up. Runs first, so a message is never lost to an early failure below.
+		drainToasts();
+
+		// And anything the server printed during this render — a settings save, say.
+		drainFlashes();
+
 		// Pending changes — select all.
 		$( document ).on( 'change', '#ifs-deploy-select-all', function () {
 			$( '.ifs-deploy-item' ).prop( 'checked', $( this ).prop( 'checked' ) );
 		} );
 
 		$( document ).on( 'click', '#ifs-deploy-push-selected', function () {
-			var $btn = $( this );
-			var ids = selectedIds();
-			if ( ! ids.length ) {
-				notify( 'No items selected.', true );
+			var set = pushable( $( '.ifs-deploy-item:checked' ) );
+
+			if ( explainEmptyPush( set, IfsDeploy.i18n.noneSelected ) ) {
 				return;
 			}
-			confirmPush( ids.length, function () {
-				request( 'ifs_deploy_deploy', { queue_ids: ids, include_others: includeOthers() }, $btn );
-			} );
+
+			// Batched, so the dialog shows real progress and no single request has to
+			// survive the whole push. No $btn is passed: the progress dialog is the
+			// feedback now, and swapping the button's text under it would be noise.
+			confirmPush( set.ids.length, function () {
+				pushStart( set.ids, includeOthers() );
+			}, set.refused );
 		} );
 
 		$( document ).on( 'click', '#ifs-deploy-push-all', function () {
-			var $btn = $( this );
-			var ids = allIds();
-			if ( ! ids.length ) {
+			var set = pushable( $( '.ifs-deploy-item' ) );
+
+			// This used to be a bare `return`, so an Editor pressing Push All on someone
+			// else's changes got no dialog, no message, and no sign the click had landed.
+			if ( explainEmptyPush( set, IfsDeploy.i18n.nothingPending ) ) {
 				return;
 			}
-			confirmPush( ids.length, function () {
-				request( 'ifs_deploy_deploy', { queue_ids: ids, include_others: includeOthers() }, $btn );
-			} );
+
+			confirmPush( set.ids.length, function () {
+				pushStart( set.ids, includeOthers() );
+			}, set.refused );
 		} );
 
 		$( document ).on( 'click', '#ifs-deploy-ignore', function () {
-			var ids = selectedIds();
-			if ( ! ids.length ) {
-				notify( 'No items selected.', true );
+			// Ignore narrows by ownership exactly as pushing does — `Ajax::ignore()` runs
+			// the same `queue_ids()` check — so it had the same silent failure and gets the
+			// same explanation. Dismissing a colleague's change is no more yours to do than
+			// publishing it.
+			var set = pushable( $( '.ifs-deploy-item:checked' ) );
+
+			if ( explainEmptyPush( set, IfsDeploy.i18n.noneSelected ) ) {
 				return;
 			}
-			request( 'ifs_deploy_ignore', { queue_ids: ids, include_others: includeOthers() }, $( this ) );
+
+			request( 'ifs_deploy_ignore', { queue_ids: set.ids, include_others: includeOthers() }, $( this ) );
 		} );
 
 		// History — rollback. The change summary is fetched and shown FIRST; Confirm
@@ -458,14 +1135,11 @@
 							done( errorNode( IfsDeploy.i18n.genericError ), false );
 						} );
 				},
+				// No reload of its own: `ifs_deploy_rollback` is in RELOAD_ACTIONS, so
+				// request() persists the toast and reloads exactly as a deploy does.
+				// Duplicating it here is how the two drifted apart in the first place.
 				onConfirm: function () {
-					request( 'ifs_deploy_rollback', { deployment_id: id }, $btn ).done( function ( res ) {
-						if ( res && res.success ) {
-							setTimeout( function () {
-								window.location.reload();
-							}, 900 );
-						}
-					} );
+					request( 'ifs_deploy_rollback', { deployment_id: id }, $btn );
 				}
 			} );
 		} );
@@ -480,13 +1154,7 @@
 				confirmLabel: IfsDeploy.i18n.confirmClearButton,
 				danger: true,
 				onConfirm: function () {
-					request( 'ifs_deploy_clear_history', {}, $btn ).done( function ( res ) {
-						if ( res && res.success ) {
-							setTimeout( function () {
-								window.location.reload();
-							}, 900 );
-						}
-					} );
+					request( 'ifs_deploy_clear_history', {}, $btn );
 				}
 			} );
 		} );
@@ -498,13 +1166,7 @@
 
 		// Compare — sync ids.
 		$( document ).on( 'click', '#ifs-deploy-sync-ids', function () {
-			request( 'ifs_deploy_sync_ids', {}, $( this ) ).done( function ( res ) {
-				if ( res && res.success ) {
-					setTimeout( function () {
-						window.location.reload();
-					}, 900 );
-				}
-			} );
+			request( 'ifs_deploy_sync_ids', {}, $( this ) );
 		} );
 
 		// Compare — push a single object by post id.
@@ -513,13 +1175,7 @@
 			var id = $btn.data( 'id' );
 
 			confirmPush( 1, function () {
-				request( 'ifs_deploy_deploy_posts', { post_ids: [ id ] }, $btn ).done( function ( res ) {
-					if ( res && res.success ) {
-						setTimeout( function () {
-							window.location.reload();
-						}, 900 );
-					}
-				} );
+				request( 'ifs_deploy_deploy_posts', { post_ids: [ id ] }, $btn );
 			} );
 		} );
 
@@ -708,6 +1364,27 @@
 			apply();
 		} );
 
+		// Forget an address: deletes history rather than changing a rule, and cannot be
+		// undone, so it asks first.
+		$( document ).on( 'click', '.ifs-deploy-forget-ip', function () {
+			var $btn = $( this );
+			var ip = String( $btn.data( 'ip' ) );
+
+			openConfirm( {
+				title: IfsDeploy.i18n.confirmForgetIpTitle,
+				text: IfsDeploy.i18n.confirmForgetIp.replace( '%s', ip ),
+				confirmLabel: IfsDeploy.i18n.confirmForgetIpButton,
+				danger: true,
+				onConfirm: function () {
+					request( 'ifs_deploy_forget_ip', { ip: ip }, $btn ).done( function ( res ) {
+						if ( res && res.success ) {
+							loadTab( 'logs', window.location.href, false );
+						}
+					} );
+				}
+			} );
+		} );
+
 		// API access log — a separate record from the event log, so a separate button.
 		$( document ).on( 'click', '#ifs-deploy-clear-api-log', function () {
 			var $btn = $( this );
@@ -729,13 +1406,7 @@
 		} );
 
 		$( document ).on( 'click', '#ifs-deploy-clear-log', function () {
-			request( 'ifs_deploy_clear_log', {}, $( this ) ).done( function ( res ) {
-				if ( res && res.success ) {
-					setTimeout( function () {
-						window.location.reload();
-					}, 700 );
-				}
-			} );
+			request( 'ifs_deploy_clear_log', {}, $( this ) );
 		} );
 
 		// Detailed logging. No $btn is passed to request(): it swaps a button's TEXT to
@@ -870,6 +1541,10 @@
 		function initPanel() {
 			initUserPickers();
 			syncRoleFields();
+
+			// The AJAX tab loader replaces the markup without a page load, so a save whose
+			// result arrived in that markup would otherwise never be shown.
+			drainFlashes();
 		}
 
 		initPanel();

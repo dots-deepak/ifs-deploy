@@ -25,6 +25,12 @@ use IfsDeploy\Export\OptionExporter;
  *   6 — no schema change. `OptionExporter::option_id()` stopped deriving an option's
  *       queue id from crc32, so the rows filed under the old value are re-keyed —
  *       see migrate().
+ *   9 — no schema change. Removes pending queue rows the current rules would never have
+ *       created: those with no author (`user_id = 0`), and plugin/theme archives.
+ *   8 — the `api_addresses` table. The roster of callers is kept apart from the request
+ *       log so it survives Clear and retention, and so a healthy pair no longer needs a
+ *       row per accepted request just to stay complete. Backfilled from any existing
+ *       api_log rows — see migrate().
  *   7 — queue gains `baseline_hash`: the state an object held BEFORE its pending change
  *       began. Editing something and then undoing the edit used to leave the row queued
  *       for ever, because the row only remembered the state it was changed TO.
@@ -73,6 +79,95 @@ final class Schema {
 		if ( version_compare( $from, '7', '<' ) && '0' !== $from ) {
 			self::collapse_duplicate_rows();
 		}
+
+		if ( version_compare( $from, '8', '<' ) && '0' !== $from ) {
+			self::seed_api_addresses();
+		}
+
+		if ( version_compare( $from, '9', '<' ) && '0' !== $from ) {
+			self::drop_untrackable_rows();
+		}
+	}
+
+	/**
+	 * Remove pending rows that the current rules would never have created.
+	 *
+	 * Two kinds, both of which were reported sitting in Pending Changes:
+	 *
+	 *  - **No author.** A row with `user_id = 0` came from cron, WP-CLI or some async
+	 *    cleanup rather than from a person. `QueueRepository::upsert()` now refuses those,
+	 *    but rows written before it did would sit there for ever as "Changed By: Unknown",
+	 *    because nothing else ever revisits a queue row.
+	 *  - **Archives.** A plugin or theme ZIP is not content and is no longer tracked, but
+	 *    the delete path used to queue one anyway.
+	 *
+	 * Matched on the TITLE for archives rather than the mime type, deliberately: these are
+	 * `delete` rows, so the attachment they describe is usually already gone and there is
+	 * no post left to ask. The title is the file name, which is the only evidence still
+	 * available.
+	 *
+	 * Scoped to `pending` — a deployed or ignored row is history, and rewriting history to
+	 * match a rule introduced later would be a different and worse kind of surprise.
+	 */
+	private static function drop_untrackable_rows(): void {
+		global $wpdb;
+
+		$table = self::queue_table();
+
+		$wpdb->query( // phpcs:ignore WordPress.DB
+			$wpdb->prepare( "DELETE FROM {$table} WHERE status = %s AND user_id = 0", 'pending' ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+
+		$archives = array( '%.zip', '%.gz', '%.tgz', '%.tar', '%.bz2', '%.rar', '%.7z', '%.exe', '%.jar', '%.phar' );
+
+		foreach ( $archives as $pattern ) {
+			$wpdb->query( // phpcs:ignore WordPress.DB
+				$wpdb->prepare(
+					"DELETE FROM {$table} WHERE status = %s AND object_type = %s AND object_title LIKE %s", // phpcs:ignore WordPress.DB.PreparedSQL
+					'pending',
+					'media',
+					$pattern
+				)
+			);
+		}
+	}
+
+	/**
+	 * Build the address roster from the request rows that already exist.
+	 *
+	 * Without this the roster starts empty on an upgrade, and every address the site has
+	 * ever seen would be announced as new the next time it called — the "first API request
+	 * from a new address" warning, for the peer it has been talking to all along.
+	 *
+	 * `INSERT ... SELECT` with `IGNORE` so a re-run cannot duplicate a row: the UNIQUE key
+	 * on `ip` is what makes this idempotent, which matters because a partly-completed
+	 * upgrade is retried from the start.
+	 */
+	private static function seed_api_addresses(): void {
+		global $wpdb;
+
+		$addresses = self::api_addresses_table();
+		$api_log   = self::api_log_table();
+
+		$wpdb->query( // phpcs:ignore WordPress.DB
+			$wpdb->prepare(
+				// phpcs:ignore WordPress.DB.PreparedSQL
+				"INSERT IGNORE INTO {$addresses} (ip, requests, failures, last_route, last_outcome, user_agent, first_seen, last_seen)
+				 SELECT ip,
+				        COUNT(*),
+				        SUM( CASE WHEN outcome NOT IN ( %s, %s ) THEN 1 ELSE 0 END ),
+				        '',
+				        '',
+				        MAX( user_agent ),
+				        MIN( created_at ),
+				        MAX( created_at )
+				 FROM {$api_log}
+				 WHERE ip <> ''
+				 GROUP BY ip",
+				'ok',
+				'ifs_deploy_duplicate'
+			)
+		);
 	}
 
 	/**
@@ -318,6 +413,41 @@ final class Schema {
 			) {$charset_collate};"
 		);
 
+		/*
+		 * DB v8 — one row per ADDRESS, separate from the per-request rows.
+		 *
+		 * Previously both questions were answered from `api_log`: "what happened recently"
+		 * by listing it, and "who calls this site" by GROUP BY over it. That coupling had
+		 * two consequences the owner actually hit.
+		 *
+		 * Clearing the request list also erased the roster of addresses — the one thing
+		 * worth keeping, because it answers "how many distinct machines push to us". And
+		 * every accepted request needed a row for the roster to stay complete, so a
+		 * healthy pair wrote a row per deploy step for ever.
+		 *
+		 * Split apart, `api_log` can hold only what is worth reading (first sightings and
+		 * failures) while the roster stays exact and survives both Clear and retention. It
+		 * is bounded by the number of distinct addresses, which on a paired site is one.
+		 */
+		$addresses = self::api_addresses_table();
+
+		dbDelta(
+			"CREATE TABLE {$addresses} (
+				id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+				ip varchar(45) NOT NULL DEFAULT '',
+				requests bigint(20) unsigned NOT NULL DEFAULT 0,
+				failures bigint(20) unsigned NOT NULL DEFAULT 0,
+				last_route varchar(40) NOT NULL DEFAULT '',
+				last_outcome varchar(40) NOT NULL DEFAULT '',
+				user_agent varchar(255) NOT NULL DEFAULT '',
+				first_seen datetime NOT NULL,
+				last_seen datetime NOT NULL,
+				PRIMARY KEY  (id),
+				UNIQUE KEY ip (ip),
+				KEY last_seen (last_seen)
+			) {$charset_collate};"
+		);
+
 		$api_log = self::api_log_table();
 
 		dbDelta(
@@ -369,6 +499,11 @@ final class Schema {
 	public static function api_log_table(): string {
 		global $wpdb;
 		return $wpdb->prefix . 'ifs_deploy_api_log';
+	}
+
+	public static function api_addresses_table(): string {
+		global $wpdb;
+		return $wpdb->prefix . 'ifs_deploy_api_addresses';
 	}
 
 	public static function nonces_table(): string {

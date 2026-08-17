@@ -372,6 +372,259 @@ body.ifs-deploy-modal-open {
 	overflow: hidden;
 }
 
+/* ===========================================================================
+   PUSH PROGRESS
+   ---------------------------------------------------------------------------
+   Modal, because a push must not be started twice while one is running and the
+   Cancel button has to be reachable at any moment. Sits at the dialog layer, above
+   toasts.
+
+   The bar's width is REAL — the browser drives the batches, so it knows how many
+   are done. Nothing here animates towards a number it has not been told.
+   =========================================================================== */
+
+.ifs-deploy-progress {
+	position: fixed;
+	inset: 0;
+	z-index: 9999;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background: rgba(25, 27, 28, .5);
+}
+
+.ifs-deploy-progress-box {
+	@apply tw-w-full tw-rounded-lg tw-bg-white tw-p-6 tw-text-grey-900;
+	max-width: 460px;
+	box-shadow: 0 12px 40px rgba(25, 27, 28, .3);
+}
+
+.ifs-deploy-progress-title {
+	@apply tw-m-0 tw-text-lg tw-font-semibold tw-text-grey-900;
+}
+
+.ifs-deploy-progress-track {
+	@apply tw-rounded-md tw-bg-grey-50;
+	height: 10px;
+	margin: 16px 0 12px;
+	overflow: hidden;
+}
+
+.ifs-deploy-progress-bar {
+	height: 100%;
+	width: 0;
+	background: #2F6B4F;
+	/* Eases between batches so the jump reads as movement rather than a flicker. The
+	   VALUE is never interpolated — only its rendering. */
+	transition: width .25s ease;
+}
+
+.ifs-deploy-progress-count {
+	@apply tw-m-0 tw-text-md tw-font-medium tw-text-grey-900;
+}
+
+.ifs-deploy-progress-phase {
+	@apply tw-mt-2 tw-mb-0 tw-text-md tw-font-medium tw-text-grey-800;
+	min-height: 20px;
+}
+
+/* The item name comes from user content and can be long; one line with an ellipsis keeps
+   the dialog from resizing on every batch, which reads as flicker. */
+.ifs-deploy-progress-item {
+	@apply tw-mt-0.5 tw-mb-0 tw-text-sm tw-text-grey-600;
+	min-height: 18px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ifs-deploy-progress-note {
+	@apply tw-mt-2 tw-mb-0 tw-text-sm tw-text-grey-600;
+	min-height: 18px;
+}
+
+.ifs-deploy-progress-actions {
+	@apply tw-mb-0;
+	margin-top: 18px;
+}
+
+/* Media ID conflict dialog — a push refused because the id is taken on Production.
+   Wider than the progress box because it lists facts rather than one line of status. */
+.ifs-deploy-conflict {
+	max-width: 560px;
+}
+
+.ifs-deploy-conflict-facts {
+	@apply tw-mt-4 tw-mb-0 tw-grid tw-gap-x-4 tw-gap-y-1 tw-text-sm;
+	grid-template-columns: max-content 1fr;
+}
+
+.ifs-deploy-conflict-facts dt {
+	@apply tw-m-0 tw-font-semibold tw-text-grey-600;
+}
+
+.ifs-deploy-conflict-facts dd {
+	@apply tw-m-0 tw-text-grey-900;
+	overflow-wrap: anywhere;
+}
+
+/* The refusal from Production, quoted as given. */
+.ifs-deploy-conflict-why {
+	@apply tw-mt-4 tw-mb-0 tw-rounded tw-p-3 tw-text-sm tw-text-grey-900;
+	background: #fcf3f2;
+	border-left: 3px solid #d63638;
+}
+
+/* Whether this site can fix it. Filled in after the reference scan answers, so it
+   starts as "checking…" rather than as a button that might not be offered. */
+.ifs-deploy-conflict-verdict {
+	@apply tw-mt-3 tw-mb-0 tw-text-sm tw-text-grey-600;
+	min-height: 18px;
+}
+
+.ifs-deploy-conflict .ifs-deploy-progress-actions button + button {
+	margin-left: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ifs-deploy-progress-bar {
+		transition: none;
+	}
+}
+
+/* ===========================================================================
+   TOASTS
+   ---------------------------------------------------------------------------
+   Results used to be a wp-admin notice near the top of the panel, which meant a
+   push made from halfway down a long table reported itself off-screen. These are
+   positioned against the VIEWPORT instead, so the answer is where the user is
+   looking whatever the scroll position.
+
+   z-index sits below `.ifs-deploy-modal` (9999): a toast must never cover the
+   dialog someone is reading, and an action taken from inside a dialog is
+   confirmed after it closes.
+   =========================================================================== */
+
+.ifs-deploy-toasts {
+	position: fixed;
+	right: 24px;
+	/* Clear of the admin bar (32px) with room to breathe. */
+	top: 56px;
+	z-index: 9990;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	/* The container spans the corner but must not swallow clicks on the page
+	   behind it; each toast re-enables them for itself. */
+	pointer-events: none;
+	max-width: min(420px, calc(100vw - 48px));
+}
+
+/*
+ * Deliberately louder than a wp-admin notice.
+ *
+ * The first version was too easy to miss: it sat in the corner at body text size with a
+ * hairline border, and people carried on working without noticing their push had failed.
+ * A message nobody reads is the same as no message, so this one is sized and weighted to
+ * be seen — a solid colour bar down the left, a heavier shadow to lift it off the page,
+ * and text a step up from the surrounding UI.
+ */
+.ifs-deploy-toast {
+	@apply tw-flex tw-items-start tw-gap-3 tw-rounded-lg tw-bg-white tw-px-5 tw-py-4 tw-text-grey-900;
+	pointer-events: auto;
+	font-size: 14px;
+	line-height: 1.5;
+	font-weight: 500;
+	border: 1px solid #EAEAEA;
+	border-left: 6px solid #7B8285;
+	box-shadow: 0 10px 34px rgba(25, 27, 28, .24), 0 2px 6px rgba(25, 27, 28, .12);
+	/* Animated in from the right by adding .is-visible on the next frame. */
+	opacity: 0;
+	transform: translateX(16px) scale(.98);
+	transition: opacity .18s ease, transform .18s ease;
+}
+
+.ifs-deploy-toast.is-visible {
+	opacity: 1;
+	transform: translateX(0) scale(1);
+}
+
+/* The left edge carries the meaning, so it uses the same success/danger colours
+   as every other status in the plugin rather than inventing a second language.
+   Both get a tinted background now: colour on the edge alone was easy to skim past
+   at the edge of vision, which is exactly where this sits. */
+.ifs-deploy-toast.is-success {
+	border-left-color: #2F6B4F;
+	background: #F4F9F6;
+}
+
+.ifs-deploy-toast.is-error {
+	border-left-color: #9B3A38;
+	background: #FBEDEC;
+}
+
+/*
+ * An error stays until it is dismissed, so it gets one pulse on arrival.
+ *
+ * Only errors, and only once: a success is read and forgotten, but a failed push that
+ * goes unnoticed is the thing this whole notification exists to prevent. Movement is what
+ * the eye catches at the edge of vision when text alone does not.
+ */
+@keyframes ifs-deploy-toast-attention {
+	0%, 100% { transform: translateX(0) scale(1); }
+	35%      { transform: translateX(-4px) scale(1.015); }
+	70%      { transform: translateX(2px) scale(1); }
+}
+
+.ifs-deploy-toast.is-error.is-visible {
+	animation: ifs-deploy-toast-attention .45s ease 1;
+}
+
+.ifs-deploy-toast-text {
+	margin: 0;
+	flex: 1 1 auto;
+	/* A raw response body from the other site can be one very long token. */
+	overflow-wrap: anywhere;
+}
+
+.ifs-deploy-toast-close {
+	@apply tw-cursor-pointer tw-bg-transparent tw-text-grey-600;
+	flex: 0 0 auto;
+	border: 0;
+	padding: 0 2px;
+	font-size: 18px;
+	line-height: 1.2;
+}
+
+.ifs-deploy-toast-close:hover,
+.ifs-deploy-toast-close:focus {
+	@apply tw-text-grey-900;
+}
+
+/* Respect a reduced-motion preference: appear, but do not slide or pulse. The colour,
+   weight and shadow carry the emphasis on their own, so nothing is lost. */
+@media (prefers-reduced-motion: reduce) {
+	.ifs-deploy-toast {
+		transition: none;
+		transform: none;
+	}
+
+	.ifs-deploy-toast.is-error.is-visible {
+		animation: none;
+	}
+}
+
+@media screen and (max-width: 782px) {
+	.ifs-deploy-toasts {
+		right: 12px;
+		left: 12px;
+		/* The mobile admin bar is taller. */
+		top: 60px;
+		max-width: none;
+	}
+}
+
 @media screen and (max-width: 782px) {
 	.ifs-deploy-modal {
 		padding: 0;

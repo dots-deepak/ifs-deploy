@@ -44,6 +44,11 @@ DESIGN.md
 PLUGIN-CONTEXT.md
 SPRINT-PLAN.txt
 
+# PENDING-CHECKLIST.md tracks what is still unverified and what is only half built. It is
+# an internal working note about the state of the work, not documentation of the plugin —
+# shipping it would tell every user which parts are untested.
+PENDING-CHECKLIST.md
+
 # --- Dependency manifest ----------------------------------------------------
 #
 # The autoloader is hand-rolled and there is no `vendor/`, so composer.json serves local

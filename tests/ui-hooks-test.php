@@ -389,5 +389,113 @@ ok( 'admin.js handles back/forward', false !== strpos( $js, "'popstate'" ) );
 // Modified clicks must stay real navigations, or middle-click stops opening a new tab.
 ok( 'admin.js leaves modified clicks alone', false !== strpos( $js, 'e.metaKey' ) );
 
+echo "\n=== toasts: JS builds them, the stylesheet dresses them ===\n";
+//
+// Results used to be a wp-admin notice near the top of the panel, so a push made from
+// halfway down a long table reported itself off-screen — and several of these actions
+// reload, which destroyed the notice a moment after it appeared. Every class below is
+// created in JS, so nothing in PHP would catch a rename: this is the only thing standing
+// between a working toast and an unstyled one.
+foreach ( array( 'ifs-deploy-toasts', 'ifs-deploy-toast', 'ifs-deploy-toast-text', 'ifs-deploy-toast-close' ) as $class ) {
+	ok( "JS creates .$class", false !== strpos( $js, $class ) );
+	ok( "and the stylesheet defines .$class", dp_css_has( $css, '.' . $class ) );
+}
+
+foreach ( array( 'is-success', 'is-error', 'is-visible' ) as $state ) {
+	ok( "the .$state state is styled", dp_css_has( $css, '.ifs-deploy-toast.' . $state ) );
+}
+
+// Fixed to the VIEWPORT — the whole point. A toast that scrolls with the document has the
+// same problem the notice had.
+ok( 'the container is fixed', dp_css_has( dp_css_rule( $css, '.ifs-deploy-toasts' ), 'position:fixed' ) );
+// Below .ifs-deploy-modal (9999): a toast must never cover a dialog being read.
+ok( 'and sits below the dialog layer', dp_css_has( dp_css_rule( $css, '.ifs-deploy-toasts' ), 'z-index:9990' ) );
+// The container spans a corner of the screen; without this it would swallow clicks on
+// whatever is behind it.
+ok( 'the container does not eat clicks', dp_css_has( dp_css_rule( $css, '.ifs-deploy-toasts' ), 'pointer-events:none' ) );
+ok( 'while each toast still takes them', dp_css_has( dp_css_rule( $css, '.ifs-deploy-toast' ), 'pointer-events:auto' ) );
+
+// Errors must NOT auto-dismiss: a success that vanishes has been read or does not matter,
+// an error that vanishes takes the only account of what went wrong with it.
+ok( 'only successes are auto-dismissed', (bool) preg_match( '/if\s*\(\s*!\s*isError\s*\)\s*\{\s*window\.setTimeout/', $js ) );
+ok( 'errors are announced assertively', false !== strpos( $js, "isError ? 'assertive' : 'polite'" ) );
+ok( 'and marked up as alerts', false !== strpos( $js, "isError ? 'alert' : 'status'" ) );
+
+// Server messages can quote a filename, a post title, or a raw response body from the
+// other site — none of which may be interpreted as markup.
+ok( 'toast text is escaped, not injected', (bool) preg_match( '/ifs-deploy-toast-text.*?\.text\(\s*message\s*\)/s', $js ) );
+
+// The reload would otherwise tear the toast down a moment after it appeared.
+ok( 'messages survive a page reload', false !== strpos( $js, 'sessionStorage' ) );
+ok( 'and are shown once the new page is up', false !== strpos( $js, 'drainToasts()' ) );
+
+echo "\n=== every action reports itself the same way ===\n";
+//
+// Rollback used to reload from its own handler, with its own delay, while request() showed
+// a NON-persisted toast — so the one action people most want confirmation of was the one
+// whose confirmation the reload destroyed. One list now decides which actions reload, and
+// they all take the same path through it.
+ok( 'the reloading actions are one list', false !== strpos( $js, 'var RELOAD_ACTIONS' ) );
+
+foreach (
+	array(
+		'ifs_deploy_deploy',
+		'ifs_deploy_deploy_posts',
+		'ifs_deploy_ignore',
+		'ifs_deploy_rollback',
+		'ifs_deploy_sync_ids',
+		'ifs_deploy_clear_history',
+		'ifs_deploy_clear_log',
+	) as $action
+) {
+	ok( "$action is in it", (bool) preg_match( '/RELOAD_ACTIONS = \[[^\]]*' . preg_quote( $action, '/' ) . '/s', $js ) );
+}
+
+// Exactly one reload in the whole file, inside reloadWith(). A second one anywhere is how
+// these behaviours drifted apart before — and the batched push, which needs the same
+// ending, calls the helper instead of repeating it.
+ok( 'only one place reloads', 1 === substr_count( $js, 'window.location.reload()' ) );
+ok( 'it lives in one helper', false !== strpos( $js, 'function reloadWith(' ) );
+// Stash the message BEFORE rebuilding the page, or the reload destroys the very
+// confirmation it was shown for. Keeping the two steps in one function is what stops them
+// being separated again.
+ok( 'and it persists the toast first', (bool) preg_match( '/function reloadWith\([^)]*\)\s*\{\s*notify\(\s*message,\s*isError,\s*true\s*\);.*?window\.location\.reload/s', $js ) );
+ok( 'the batched push reuses it', 3 <= substr_count( $js, 'reloadWith(' ) );
+
+echo "\n=== a server-rendered result uses the same toast ===\n";
+//
+// Saving settings posts a real form, so its outcome is decided during render — long after
+// admin_enqueue_scripts, which is why it cannot simply be localised into the script. It
+// used to be printed as a wp-admin notice instead, so one part of the plugin reported
+// itself in WordPress's voice while every other action reported itself in the plugin's.
+// Comments stripped: the docblock explaining this very change names the string it is
+// looking for, and would satisfy the assertion on its own.
+$settings = (string) php_strip_whitespace( $root . '/src/Admin/Pages/SettingsPage.php' );
+
+ok( 'the save emits a marker, not a wp-admin notice', false !== strpos( $settings, 'ifs-deploy-flash' ) );
+ok( 'and no success notice is printed there', false === strpos( $settings, 'notice notice-success' ) );
+
+/*
+ * The notices that REMAIN on that screen are deliberate, and the distinction is the point.
+ *
+ * "Your settings were saved" is the result of an ACTION and belongs in the toast, with
+ * every other action's result. "The address rules currently restrict the API" describes a
+ * standing STATE of the screen — it is true until the setting changes, and a message that
+ * fades after six seconds would be exactly the wrong shape for it.
+ */
+ok( 'standing state notices are left inline', false !== strpos( $settings, 'notice notice-' ) );
+ok( 'JS turns markers into toasts', false !== strpos( $js, 'function drainFlashes(' ) );
+// Removed once shown, or switching away and back replays a message about something that
+// happened two screens ago.
+ok( 'and removes them once shown', (bool) preg_match( '/function drainFlashes\(\).*?\$flash\.remove\(\)/s', $js ) );
+// On load AND after a panel swap: the AJAX tab loader replaces the markup with no page
+// load happening at all.
+ok( 'drained on load', (bool) preg_match( '/drainToasts\(\);\s*(\/\/[^\n]*\n\s*)*drainFlashes\(\);/', $js ) );
+ok( 'and after a panel swap', (bool) preg_match( '/function initPanel\(\).*?drainFlashes\(\)/s', $js ) );
+
+// Nothing may hardcode a user-facing string: it cannot be translated, and it is the one
+// kind of message that escapes the i18n contract contracts-test.php enforces.
+ok( 'no hardcoded message text is left', 0 === preg_match( "/notify\(\s*'/", $js ) );
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

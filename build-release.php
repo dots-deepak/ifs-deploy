@@ -229,7 +229,7 @@ if ( ! empty( $absent ) ) {
 // And the things that must NOT be.
 $forbidden = array_filter(
 	$files,
-	static fn( string $f ): bool => 0 === strpos( $f, 'tests/' ) || 0 === strpos( $f, 'tools/' ) || in_array( $f, array( 'PLUGIN-CONTEXT.md', 'DESIGN.md', 'SPRINT-PLAN.txt' ), true )
+	static fn( string $f ): bool => 0 === strpos( $f, 'tests/' ) || 0 === strpos( $f, 'tools/' ) || in_array( $f, array( 'PLUGIN-CONTEXT.md', 'DESIGN.md', 'SPRINT-PLAN.txt', 'PENDING-CHECKLIST.md' ), true )
 );
 
 if ( ! empty( $forbidden ) ) {

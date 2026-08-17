@@ -194,6 +194,26 @@ $warn_at    = strpos( $page, "\$comparison['truncated']" );
 $summary_at = strpos( $page, 'summary(' );
 ok( 'and before the summary it qualifies', false !== $warn_at && false !== $summary_at && $warn_at < $summary_at );
 
+echo "\n=== rows the current rules would never create are cleaned up ===\n";
+//
+// Nothing revisits a queue row once written, so a rule introduced later does not tidy up
+// after itself — the "Changed By: Unknown" entries and the plugin ZIPs on the reported
+// screen would have sat there for ever.
+ok( 'a migration removes them', false !== strpos( $schema_src, 'drop_untrackable_rows' ) );
+ok( 'authorless rows go', (bool) preg_match( '/status = %s AND user_id = 0/', $schema_src ) );
+ok( 'and archive rows go', (bool) preg_match( "/'%\.zip'/", $schema_src ) );
+// Matched on the TITLE because these are delete rows: the attachment is usually already
+// gone, so its mime type cannot be asked for. The file name is the only evidence left.
+ok( 'archives are matched by file name', false !== strpos( $schema_src, 'object_title LIKE %s' ) );
+// Scoped to pending: a deployed or ignored row is history, and rewriting history to match
+// a later rule is a different and worse surprise.
+ok( 'only PENDING rows are touched', 0 === preg_match( "/DELETE FROM \{\\\$table\} WHERE status = %s AND user_id = 0[^']*'deployed'/", $schema_src ) );
+ok( 'and it is version-gated', (bool) preg_match( "/version_compare\(\s*\\\$from,\s*'9',\s*'<'\s*\)/", $schema_src ) );
+
+$boot9 = (string) file_get_contents( $root . '/ifs-deploy.php' );
+preg_match( "/IFS_DEPLOY_DB_VERSION',\s*'(\d+)'/", $boot9, $v9 );
+ok( 'behind a schema bump', (int) ( $v9[1] ?? 0 ) >= 9 );
+
 echo "\n=== a deployment can only be rolled back once ===\n";
 //
 // Replaying is not the no-op it looks like. Roll back deploy B and then deploy A and

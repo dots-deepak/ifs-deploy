@@ -20,6 +20,7 @@ $dir = __DIR__;
 /** Suites that report PASS/FAIL lines and exit non-zero on failure. */
 $suites = array(
 	'access',
+	'batching',
 	'byref',
 	'concurrency',
 	'contracts',
@@ -34,6 +35,7 @@ $suites = array(
 	'media-match',
 	'media-url',
 	'mediadiff',
+	'mediaid',
 	'mediatrack',
 	'meta',
 	'metablock',

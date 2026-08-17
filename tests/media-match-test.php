@@ -119,5 +119,42 @@ reset_store();
 add_attachment( 63400, 'BIRD-Thumbnail.JPG' );
 ok( 'filename comparison is case-insensitive', 63400 === $m->find_existing( pkg( 63400, 'bird-thumbnail.jpg', 'https://stg.test/x.jpg' ) ) );
 
+echo "\n=== a large file is never read into memory ===\n";
+//
+// `wp_upload_bits()` takes the file's CONTENTS as a string, so this used to run
+// file_get_contents() on the download and hand the whole thing over — PHP then held the
+// entire file in memory and wrote it straight back out to disk. A 40 MB upload needed
+// 40 MB of memory, often twice while the string was copied, on top of everything
+// WordPress already has loaded. That is where a large media push died, and it died with a
+// fatal rather than a message.
+//
+// The file is already on disk when we get there; moving it costs no memory at any size.
+$media_src = (string) php_strip_whitespace( __DIR__ . '/../src/Import/MediaImporter.php' );
+
+ok( 'the download is never read into a string', false === strpos( $media_src, 'file_get_contents' ) );
+ok( 'and wp_upload_bits is gone with it', false === strpos( $media_src, 'wp_upload_bits' ) );
+ok( 'the file is moved into place instead', (bool) preg_match( '/@rename\(\s*\$tmp,\s*\$target\s*\)/', $media_src ) );
+// rename() is atomic but only within one filesystem, and the temp directory is not always
+// on the same mount.
+ok( 'with a copy fallback across filesystems', (bool) preg_match( '/@copy\(\s*\$tmp,\s*\$target\s*\)/', $media_src ) );
+
+// Everything wp_upload_bits() did that the rest of the plugin depends on is kept.
+ok( 'the non-overwriting filename rule is kept', false !== strpos( $media_src, 'wp_unique_filename(' ) );
+ok( "the attachment's own date still picks the folder", (bool) preg_match( '/wp_upload_dir\(\s*\$time\s*\)/', $media_src ) );
+ok( 'and unreadable uploads are reported, not fataled', false !== strpos( $media_src, 'uploads directory could not be written to' ) );
+
+echo "\n=== a delete that matched nothing is not a success ===\n";
+//
+// It used to return quietly with object_id 0, which ImportManager records as `ok`. So
+// deleting media on Staging and pushing reported "Deployment complete" while the file was
+// still live on Production — the deploy claimed to have done something it never attempted.
+ok( 'an unmatched media delete is an error', (bool) preg_match( "/if \( ! \\\$existing \) \{.*?WP_Error.*?ifs_deploy_delete_no_match/s", $media_src ) );
+ok( 'and the message names the file', false !== strpos( $media_src, 'No media on this site matched' ) );
+
+$post_src = (string) php_strip_whitespace( __DIR__ . '/../src/Import/PostImporter.php' );
+ok( 'the same holds for a post', false !== strpos( $post_src, 'ifs_deploy_delete_no_match' ) );
+// The two real causes are separated, because the fix for each is different.
+ok( 'and it points at Sync IDs when the object does exist', false !== strpos( $post_src, 'Sync IDs' ) );
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

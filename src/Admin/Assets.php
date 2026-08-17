@@ -62,11 +62,57 @@ final class Assets {
 					'confirmAllowIpButton'  => __( 'Allow address', 'ifs-deploy' ),
 					'confirmClearApiTitle'  => __( 'Clear API access log', 'ifs-deploy' ),
 					'confirmClearApi'       => __( 'Delete the record of every API request to this site? This is the security log — once cleared, past unauthorized attempts cannot be reviewed.', 'ifs-deploy' ),
+					'confirmForgetIpTitle'  => __( 'Forget this address', 'ifs-deploy' ),
+					/* translators: %s: IP address */
+					'confirmForgetIp'       => __( 'Remove %s and every request logged from it? This deletes history rather than changing a rule, it cannot be undone, and the address will be reported as new the next time it calls.', 'ifs-deploy' ),
+					'confirmForgetIpButton' => __( 'Forget address', 'ifs-deploy' ),
+					'noneSelected'          => __( 'Nothing is selected. Tick at least one item first.', 'ifs-deploy' ),
+					'nothingPending'        => __( 'There is nothing pending to push.', 'ifs-deploy' ),
+					'pushNotYours'          => __( 'You don’t have permission to push these changes. They were made by someone else, and only the person who made a change — or an administrator — can push it.', 'ifs-deploy' ),
+					/* translators: %d: how many items belong to other users */
+					'pushExcluded'          => __( '%d of these were made by someone else and will NOT be pushed.', 'ifs-deploy' ),
+					'pushTitle'             => __( 'Pushing changes to Production', 'ifs-deploy' ),
+					/* translators: 1: items done, 2: items total, 3: percentage complete */
+					'pushProgress'          => __( '%1$d of %2$d items — %3$d%% complete', 'ifs-deploy' ),
+					'pushPhaseMedia'        => __( 'Uploading media…', 'ifs-deploy' ),
+					'pushPhaseTerm'         => __( 'Syncing categories and tags…', 'ifs-deploy' ),
+					'pushPhasePost'         => __( 'Syncing posts and pages…', 'ifs-deploy' ),
+					'pushPhaseMenu'         => __( 'Updating menus…', 'ifs-deploy' ),
+					'pushPhaseOption'       => __( 'Updating settings…', 'ifs-deploy' ),
+					'pushPhaseOther'        => __( 'Syncing content…', 'ifs-deploy' ),
+					/* translators: 1: name of the first item in the batch, 2: how many others are in it */
+					'pushItemMore'          => __( '%1$s and %2$d more', 'ifs-deploy' ),
+					/* translators: %d: seconds remaining */
+					'pushEtaSeconds'        => __( 'About %d seconds remaining', 'ifs-deploy' ),
+					/* translators: %d: minutes remaining */
+					'pushEtaMinutes'        => __( 'About %d minutes remaining', 'ifs-deploy' ),
+					'pushEtaAlmost'         => __( 'Almost done…', 'ifs-deploy' ),
+					'pushCancel'            => __( 'Cancel push', 'ifs-deploy' ),
+					'pushCancelling'        => __( 'Stopping, and undoing what has already been sent…', 'ifs-deploy' ),
+					/* translators: %d: number of items pushed */
+					'pushDone'              => __( 'Pushed %d items to Production.', 'ifs-deploy' ),
 					'working'               => __( 'Working…', 'ifs-deploy' ),
+				// Media ID conflict dialog. Production refused to create the attachment
+				// because its Staging id is already taken there.
+				'conflictTitle'         => __( 'Media ID mismatch detected', 'ifs-deploy' ),
+				'conflictMedia'         => __( 'Media', 'ifs-deploy' ),
+				'conflictStagingId'     => __( 'Staging ID', 'ifs-deploy' ),
+				'conflictProdId'        => __( 'On Production', 'ifs-deploy' ),
+				'conflictNotAvailable'  => __( 'Not available', 'ifs-deploy' ),
+				/* translators: 1: post type occupying the id, 2: its title */
+				'conflictTakenBy'       => __( 'Taken by a %1$s, "%2$s"', 'ifs-deploy' ),
+				'conflictChecking'      => __( 'Checking whether this file can be moved…', 'ifs-deploy' ),
+				/* translators: %d: the new attachment id being offered */
+				'conflictGenerate'      => __( 'Generate new ID (%d)', 'ifs-deploy' ),
+				'conflictWorking'       => __( 'Changing the ID…', 'ifs-deploy' ),
+				'conflictCancel'        => __( 'Cancel', 'ifs-deploy' ),
 					'genericError'          => __( 'Request failed. Please try again.', 'ifs-deploy' ),
 					'loadingPreview'        => __( 'Comparing with Production…', 'ifs-deploy' ),
 					'previewTitle'          => __( 'Changes to be deployed', 'ifs-deploy' ),
 					'remove'                => __( 'Remove', 'ifs-deploy' ),
+					// The toast's dismiss button carries no text, so the label is the only
+					// thing a screen reader has to announce it by.
+					'close'                 => __( 'Dismiss this message', 'ifs-deploy' ),
 				),
 			)
 		);

@@ -56,6 +56,18 @@ final class ChangeTracker {
 		// Media library.
 		add_action( 'add_attachment', array( $this->media, 'on_change' ), 10, 1 );
 		add_action( 'edit_attachment', array( $this->media, 'on_change' ), 10, 1 );
+
+		/*
+		 * BOTH ways media can be removed, because they are genuinely different hooks.
+		 *
+		 * `wp_delete_attachment()` returns early into `wp_trash_post()` when the site has
+		 * `MEDIA_TRASH` enabled — so on those sites `delete_attachment` NEVER fires, and
+		 * listening only for it meant trashing an image was not tracked at all.
+		 *
+		 * `wp_trash_post` fires for every post type, so the observer checks the type
+		 * itself rather than this registration having to know.
+		 */
+		add_action( 'wp_trash_post', array( $this->media, 'on_trash' ), 10, 1 );
 		add_action( 'delete_attachment', array( $this->media, 'on_delete' ), 10, 1 );
 
 		// Navigation menus (create + change; a single hook covers both).

@@ -6,6 +6,7 @@ namespace IfsDeploy\Admin;
 use IfsDeploy\Client\CompareService;
 use IfsDeploy\Client\DeployClient;
 use IfsDeploy\Client\DeploymentService;
+use IfsDeploy\Client\MediaIdResolver;
 use IfsDeploy\Client\PreviewService;
 use IfsDeploy\History\DeploymentRepository;
 use IfsDeploy\Queue\QueueRepository;
@@ -25,11 +26,16 @@ final class Ajax {
 
 	public function register(): void {
 		add_action( 'wp_ajax_ifs_deploy_deploy', array( $this, 'deploy' ) );
+		add_action( 'wp_ajax_ifs_deploy_push_plan', array( $this, 'push_plan' ) );
+		add_action( 'wp_ajax_ifs_deploy_push_batch', array( $this, 'push_batch' ) );
+		add_action( 'wp_ajax_ifs_deploy_push_cancel', array( $this, 'push_cancel' ) );
 		add_action( 'wp_ajax_ifs_deploy_deploy_posts', array( $this, 'deploy_posts' ) );
 		add_action( 'wp_ajax_ifs_deploy_ignore', array( $this, 'ignore' ) );
 		add_action( 'wp_ajax_ifs_deploy_rollback', array( $this, 'rollback' ) );
 		add_action( 'wp_ajax_ifs_deploy_test_connection', array( $this, 'test_connection' ) );
 		add_action( 'wp_ajax_ifs_deploy_sync_ids', array( $this, 'sync_ids' ) );
+		add_action( 'wp_ajax_ifs_deploy_media_id_inspect', array( $this, 'media_id_inspect' ) );
+		add_action( 'wp_ajax_ifs_deploy_media_id_renumber', array( $this, 'media_id_renumber' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_history', array( $this, 'clear_history' ) );
 		add_action( 'wp_ajax_ifs_deploy_preview', array( $this, 'preview' ) );
 		add_action( 'wp_ajax_ifs_deploy_diagnostics', array( $this, 'diagnostics' ) );
@@ -37,6 +43,7 @@ final class Ajax {
 		add_action( 'wp_ajax_ifs_deploy_verbose_log', array( $this, 'verbose_log' ) );
 		add_action( 'wp_ajax_ifs_deploy_clear_api_log', array( $this, 'clear_api_log' ) );
 		add_action( 'wp_ajax_ifs_deploy_mark_ip', array( $this, 'mark_ip' ) );
+		add_action( 'wp_ajax_ifs_deploy_forget_ip', array( $this, 'forget_ip' ) );
 		add_action( 'wp_ajax_ifs_deploy_search_users', array( $this, 'search_users' ) );
 		add_action( 'wp_ajax_ifs_deploy_rollback_preview', array( $this, 'rollback_preview' ) );
 		add_action( 'wp_ajax_ifs_deploy_tab', array( $this, 'tab' ) );
@@ -162,6 +169,35 @@ final class Ajax {
 	 * different questions, and wiping the security record while tidying up diagnostics
 	 * would be a surprising side effect.
 	 */
+	/**
+	 * Remove one address from the roster, with its request rows.
+	 *
+	 * Separate from clear_api_log() for the same reason that one is separate from
+	 * clear_log(): they answer different questions, and the roster is the part kept on
+	 * purpose. This is the only way to remove an address, so it has to be deliberate.
+	 */
+	public function forget_ip(): void {
+		$this->guard();
+
+		$ip = isset( $_POST['ip'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['ip'] ) ) : '';
+
+		if ( '' === $ip ) {
+			wp_send_json_error( array( 'message' => __( 'No address given.', 'ifs-deploy' ) ) );
+		}
+
+		ApiLog::forget_ip( $ip );
+
+		wp_send_json_success(
+			array(
+				'message' => sprintf(
+					/* translators: %s: IP address */
+					__( '%s was removed. It will be reported as a new address the next time it calls.', 'ifs-deploy' ),
+					$ip
+				),
+			)
+		);
+	}
+
 	public function clear_api_log(): void {
 		$this->guard();
 
@@ -322,6 +358,97 @@ final class Ajax {
 		wp_send_json_error( array( 'message' => $result['message'] ) );
 	}
 
+	/**
+	 * Plan a batched push and hand the browser the work list.
+	 *
+	 * The browser then drives it one batch at a time, which is what makes a progress bar
+	 * possible at all: a single blocking request has nothing to report from inside itself.
+	 * It is also what stops a large push from dying on the server's execution limit —
+	 * every batch is its own short request.
+	 *
+	 * Permission is decided HERE, once, on the whole selection. Doing it per batch would
+	 * let a push start and then fail half way with a permission error, having already
+	 * changed Production.
+	 */
+	public function push_plan(): void {
+		$this->guard( Access::CAP_DEPLOY );
+		$this->require_staging();
+
+		$ids = $this->queue_ids();
+
+		if ( empty( $ids ) ) {
+			wp_send_json_error( array( 'message' => __( 'No items selected.', 'ifs-deploy' ) ) );
+		}
+
+		$plan = ( new DeploymentService() )->plan( $ids );
+
+		if ( 0 === $plan['total'] ) {
+			wp_send_json_error( array( 'message' => __( 'Nothing to deploy — these items are no longer pending. Refresh the list.', 'ifs-deploy' ) ) );
+		}
+
+		wp_send_json_success( $plan );
+	}
+
+	/**
+	 * Send one batch of a planned push.
+	 *
+	 * The uuid comes from the browser, which is safe here because it only groups this
+	 * user's own batches on Production — every request is still individually signed and
+	 * authenticated, and the ids are re-checked against ownership below.
+	 */
+	public function push_batch(): void {
+		$this->guard( Access::CAP_DEPLOY );
+		$this->require_staging();
+
+		$uuid = isset( $_POST['uuid'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['uuid'] ) ) : '';
+
+		if ( '' === $uuid ) {
+			wp_send_json_error( array( 'message' => __( 'This push has lost track of itself. Refresh the page and try again.', 'ifs-deploy' ) ) );
+		}
+
+		$ids = $this->queue_ids();
+
+		$result = ( new DeploymentService() )->deploy_batch( $uuid, $ids, get_current_user_id() );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( $result );
+		}
+
+		// The conflicts travel with the failure. A media ID clash is the one failure this
+		// site can still act on, and the dialog needs the ids to offer that.
+		wp_send_json_error(
+			array(
+				'message'   => $result['message'],
+				'conflicts' => (array) ( $result['conflicts'] ?? array() ),
+			)
+		);
+	}
+
+	/**
+	 * Stop a push and undo whatever it has already applied.
+	 *
+	 * The rows stay in Pending Changes afterwards: cancelling is a decision not to publish
+	 * yet, not a decision to throw the work away.
+	 */
+	public function push_cancel(): void {
+		$this->guard( Access::CAP_DEPLOY );
+		$this->require_staging();
+
+		$uuid = isset( $_POST['uuid'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['uuid'] ) ) : '';
+
+		if ( '' === $uuid ) {
+			wp_send_json_error( array( 'message' => __( 'Nothing to cancel.', 'ifs-deploy' ) ) );
+		}
+
+		$result = ( new DeploymentService() )->cancel( $uuid, $this->queue_ids() );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( array( 'message' => $result['message'] ) );
+		}
+
+		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
 	public function deploy_posts(): void {
 		$this->guard();
 		$this->require_staging();
@@ -350,6 +477,57 @@ final class Ajax {
 		if ( ! empty( $result['ok'] ) ) {
 			wp_send_json_success( array( 'message' => $result['message'] ) );
 		}
+		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
+	/**
+	 * Could this attachment's id be changed, and what would it become? Changes nothing.
+	 *
+	 * Split from the renumber deliberately: the dialog asks this first so it can say what
+	 * is in the way BEFORE offering a button, rather than offering one and then refusing.
+	 */
+	public function media_id_inspect(): void {
+		$this->guard( Access::CAP_DEPLOY );
+		$this->require_staging();
+
+		$id = isset( $_POST['attachment_id'] ) ? absint( wp_unslash( $_POST['attachment_id'] ) ) : 0;
+
+		if ( ! $id ) {
+			wp_send_json_error( array( 'message' => __( 'No media item given.', 'ifs-deploy' ) ) );
+		}
+
+		$result = ( new MediaIdResolver() )->inspect( $id );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( $result );
+		}
+
+		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
+	/**
+	 * Actually move the attachment to an id free on both sites.
+	 *
+	 * Guarded by CAP_DEPLOY rather than the plain admin capability because it rewrites a
+	 * row in `wp_posts` — it is a deployment repair, not a settings tweak, and whoever can
+	 * push is who needs it.
+	 */
+	public function media_id_renumber(): void {
+		$this->guard( Access::CAP_DEPLOY );
+		$this->require_staging();
+
+		$id = isset( $_POST['attachment_id'] ) ? absint( wp_unslash( $_POST['attachment_id'] ) ) : 0;
+
+		if ( ! $id ) {
+			wp_send_json_error( array( 'message' => __( 'No media item given.', 'ifs-deploy' ) ) );
+		}
+
+		$result = ( new MediaIdResolver() )->renumber( $id );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( $result );
+		}
+
 		wp_send_json_error( array( 'message' => $result['message'] ) );
 	}
 
@@ -475,24 +653,66 @@ final class Ajax {
 		}
 
 		/*
-		 * Ownership narrowing now applies to ADMINISTRATORS TOO, unless they opt in.
+		 * A CHANGE IS PUSHED BY THE PERSON WHO MADE IT — and by an administrator.
 		 *
-		 * It previously returned everything for anyone with "see all", which made an
-		 * administrator's single "Push All" click deploy every colleague's pending row —
-		 * including work someone was halfway through. On a fifteen-person team that is the
-		 * most likely way to push something nobody meant to publish, and it looked like a
-		 * normal action right up until it happened.
+		 * The rule used to key off `view_all`, so anyone who could SEE everyone's changes
+		 * could also push them. Seeing and publishing are different powers: an editor may
+		 * legitimately need the first without the second, and pushing a colleague's
+		 * half-finished page is the most likely way to publish something nobody intended.
 		 *
-		 * `include_others` is sent only when the user has ticked the box next to the button,
-		 * so the wide behaviour is still available — it just has to be asked for. Someone
-		 * without "see all" can never widen their scope, whatever they send.
+		 * The exemption is `manage_options` — a real administrator — and it exists because
+		 * the alternative strands work: someone goes on leave, and their approved changes
+		 * cannot be pushed by anyone. Even then it has to be ASKED for with the checkbox,
+		 * so an administrator's "Push All" click still defaults to their own rows only.
+		 *
+		 * Enforced against the DATABASE, never from the page the user was served.
 		 */
-		$wants_others = ! empty( $_POST['include_others'] ) && Access::sees_all();
+		$is_admin = current_user_can( Access::CAP_MANAGE );
 
-		if ( $wants_others ) {
+		if ( $is_admin && ! empty( $_POST['include_others'] ) ) {
 			return $ids;
 		}
 
-		return ( new QueueRepository() )->ids_owned_by( $ids, get_current_user_id() );
+		$owned = ( new QueueRepository() )->ids_owned_by( $ids, get_current_user_id() );
+
+		/*
+		 * SAY SO when rows were removed, rather than narrowing in silence.
+		 *
+		 * Selecting a colleague's row and pressing Push used to end at "No items
+		 * selected." — which is not what happened, and sends the user looking for a fault
+		 * in their own selection. Refusing outright, and naming the reason, is the whole
+		 * of the permission error that was missing.
+		 */
+		$refused = count( $ids ) - count( $owned );
+
+		if ( $refused > 0 ) {
+			wp_send_json_error(
+				array(
+					'message' => $is_admin
+						? sprintf(
+							/* translators: %d: how many items belong to other people */
+							_n(
+								'%d of the selected items was changed by someone else. Tick "Include changes made by other users" to push it as well.',
+								'%d of the selected items were changed by someone else. Tick "Include changes made by other users" to push them as well.',
+								$refused,
+								'ifs-deploy'
+							),
+							$refused
+						)
+						: sprintf(
+							/* translators: %d: how many items belong to other people */
+							_n(
+								'You do not have permission to push these changes. %d of the selected items was made by someone else, and only the person who made a change — or an administrator — can push it.',
+								'You do not have permission to push these changes. %d of the selected items were made by someone else, and only the person who made a change — or an administrator — can push them.',
+								$refused,
+								'ifs-deploy'
+							),
+							$refused
+						),
+				)
+			);
+		}
+
+		return $owned;
 	}
 }

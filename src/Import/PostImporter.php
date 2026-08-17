@@ -286,11 +286,61 @@ final class PostImporter {
 	 *
 	 * @return array{post_id:int,created:bool}
 	 */
-	private function delete_post( array $package ): array {
+	private function delete_post( array $package ) {
 		$existing = $this->find_target( $package );
-		if ( $existing ) {
+
+		/*
+		 * A DELETE THAT MATCHED NOTHING IS NOT A SUCCESS.
+		 *
+		 * This used to return quietly with post_id 0, which ImportManager records as
+		 * `ok`. So deleting a page on Staging and pushing it reported "Deployment
+		 * complete" while the page was still live on Production — the deploy said it had
+		 * done something it had not even attempted. Reported as "deletion does not
+		 * reflect on production".
+		 *
+		 * Saying so names the two real causes and separates them: either the object was
+		 * never deployed here (nothing to remove, which is fine but worth knowing), or the
+		 * matcher could not find it (which needs Sync IDs, and would otherwise stay
+		 * invisible for ever).
+		 */
+		if ( ! $existing ) {
+			return new WP_Error(
+				'ifs_deploy_delete_no_match',
+				sprintf(
+					/* translators: %s: object title */
+					__( 'Nothing on this site matched "%s", so there was nothing to delete. It was probably never deployed here — if it does exist, use Compare & Sync → Sync IDs to link the two copies first.', 'ifs-deploy' ),
+					(string) ( $package['object']['post_title'] ?? '' )
+				)
+			);
+		}
+
+		/*
+		 * MIRROR THE INTENT, the same way the media path does.
+		 *
+		 * This was `wp_trash_post()` unconditionally, so permanently deleting a page on
+		 * Staging only ever moved Production's copy to the trash. The two sites then
+		 * disagreed for good: the page was gone here, still restorable there, and the
+		 * deploy reported success either way. Emptying Staging's trash pushed nothing new,
+		 * because the object had already been removed and its queue row already spent.
+		 *
+		 * Trash stays trash — a rollback is meant to be possible, and that is the whole
+		 * reason a trashed removal does not destroy anything.
+		 */
+		if ( 'delete' === ( $package['removal'] ?? 'trash' ) ) {
+			wp_delete_post( $existing, true );
+
+			return array( 'post_id' => $existing, 'created' => false );
+		}
+
+		$post = get_post( $existing );
+
+		// Already trashed → that is the requested state. Calling wp_trash_post() again
+		// returns false, and treating that as a failure would make an unchanged, correct
+		// site look like a broken deploy.
+		if ( $post instanceof \WP_Post && 'trash' !== $post->post_status ) {
 			wp_trash_post( $existing );
 		}
+
 		return array( 'post_id' => $existing, 'created' => false );
 	}
 
@@ -371,16 +421,41 @@ final class PostImporter {
 
 	/**
 	 * Locate the production post previously deployed from this origin.
+	 *
+	 * ── WHY THIS RUNS THE QUERY TWICE ──────────────────────────────────────────────
+	 *
+	 * `'any'` DOES NOT INCLUDE `'trash'`. WP_Query builds it by EXCLUDING every status
+	 * flagged `exclude_from_search`, and trash is exactly such a status — so listing
+	 * `array( 'any', 'trash' )` does not work either: the `'any'` in it adds the very
+	 * exclusion the `'trash'` was meant to lift, and the exclusion wins.
+	 *
+	 * Two passes is the honest way to express "anything, including the trash", and it
+	 * keeps the common case unchanged: a live post is found by the first query exactly as
+	 * before, and the second only runs when nothing matched at all.
+	 *
+	 * It matters because this plugin puts posts in Production's trash itself, on every
+	 * pushed trash. Without the second pass the strongest matcher there is — the origin
+	 * stamp — went blind to its own handiwork: emptying Staging's trash afterwards could
+	 * not find the copy it had trashed, and reported the permanent delete as "nothing
+	 * matched, it was probably never deployed here".
 	 */
 	public function find_by_origin( int $origin_id, string $origin_site ): int {
 		if ( $origin_id <= 0 || '' === $origin_site ) {
 			return 0;
 		}
 
+		return $this->origin_query( $origin_id, $origin_site, 'any' )
+			?: $this->origin_query( $origin_id, $origin_site, 'trash' );
+	}
+
+	/**
+	 * One origin-stamp lookup, restricted to a single post status.
+	 */
+	private function origin_query( int $origin_id, string $origin_site, string $status ): int {
 		$query = new \WP_Query(
 			array(
 				'post_type'              => 'any',
-				'post_status'            => 'any',
+				'post_status'            => $status,
 				'posts_per_page'         => 1,
 				'fields'                 => 'ids',
 				'no_found_rows'          => true,

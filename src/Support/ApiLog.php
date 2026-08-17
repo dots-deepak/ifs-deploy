@@ -120,6 +120,12 @@ final class ApiLog {
 		$is_failure = self::is_failure( $outcome );
 		$is_new     = self::is_new_ip( $ip );
 
+		// The roster is updated for EVERY request, including the routine accepted ones
+		// that no longer earn a row of their own. It is one upsert against a unique key,
+		// and it is what keeps "who calls this site" exact while the list below stays
+		// short. Done before the early returns, or a duplicate delivery would not count.
+		self::touch_address( $ip, $route, $outcome, $is_failure, $now );
+
 		/*
 		 * Drop a duplicate delivery, unless it is this address's FIRST appearance.
 		 *
@@ -131,6 +137,26 @@ final class ApiLog {
 		 * its "New" badge and is worth having.
 		 */
 		if ( self::DUPLICATE === $outcome && ! $is_new && ! self::logs_duplicates() ) {
+			return;
+		}
+
+		/*
+		 * A ROUTINE ACCEPTED REQUEST GETS NO ROW.
+		 *
+		 * Every step of a deploy is an API call — object, signatures, import, rollback
+		 * preview, rollback — so a working pair wrote a handful of "accepted" rows per
+		 * push, for ever, and the table grew without ever saying anything. A list where
+		 * every entry is "fine" is not a security log; it is a place failures go to hide.
+		 *
+		 * What is kept is what is worth reading: a FIRST SIGHTING of an address, and
+		 * anything that FAILED. Both are exceptions, so the table stays small enough to
+		 * scan and every row in it is a reason to look.
+		 *
+		 * Nothing is lost by counting rather than listing: `touch_address()` above has
+		 * already recorded the request against its address, so totals, first/last seen and
+		 * the roster stay exact.
+		 */
+		if ( ! $is_new && ! $is_failure && self::DUPLICATE !== $outcome ) {
 			return;
 		}
 
@@ -223,15 +249,52 @@ final class ApiLog {
 	}
 
 	/**
+	 * Count this request against its address, creating the address on first sight.
+	 *
+	 * One statement, resolved by the UNIQUE key on `ip`, so two concurrent requests from
+	 * one address cannot both insert — the same reasoning as the queue's own identity key.
+	 */
+	private static function touch_address( string $ip, string $route, string $outcome, bool $is_failure, string $now ): void {
+		global $wpdb;
+
+		if ( '' === $ip ) {
+			return;
+		}
+
+		$table = Schema::api_addresses_table();
+
+		$wpdb->query( // phpcs:ignore WordPress.DB
+			$wpdb->prepare(
+				// phpcs:ignore WordPress.DB.PreparedSQL
+				"INSERT INTO {$table} (ip, requests, failures, last_route, last_outcome, user_agent, first_seen, last_seen)
+				 VALUES (%s, 1, %d, %s, %s, %s, %s, %s)
+				 ON DUPLICATE KEY UPDATE
+				     requests     = requests + 1,
+				     failures     = failures + %d,
+				     last_route   = VALUES(last_route),
+				     last_outcome = VALUES(last_outcome),
+				     user_agent   = VALUES(user_agent),
+				     last_seen    = VALUES(last_seen)",
+				$ip,
+				$is_failure ? 1 : 0,
+				substr( $route, 0, 40 ),
+				substr( $outcome, 0, 40 ),
+				self::user_agent(),
+				$now,
+				$now,
+				$is_failure ? 1 : 0
+			)
+		);
+	}
+
+	/**
 	 * Has this address been seen before?
 	 *
-	 * Answered from the log itself rather than a separate list of known addresses, so
-	 * there is one source of truth and no second store to keep in step. Cheap: the
-	 * `ip_time` index makes it a single indexed lookup.
-	 *
-	 * Note the consequence of retention — an address whose rows have all been purged
-	 * reads as new again. That is the honest answer given the data kept, and it errs
-	 * toward telling you rather than staying quiet.
+	 * Answered from the ADDRESS ROSTER, not from the request rows. It used to be the
+	 * latter, and that tied "is this address known?" to how long request rows happen to be
+	 * kept: an address whose rows had aged out — or been cleared by hand — was announced
+	 * as a brand new caller the next time the paired site deployed. The roster is not
+	 * purged by retention and survives Clear, so the answer is now simply true.
 	 */
 	private static function is_new_ip( string $ip ): bool {
 		global $wpdb;
@@ -240,7 +303,7 @@ final class ApiLog {
 			return false;
 		}
 
-		$table = Schema::api_log_table();
+		$table = Schema::api_addresses_table();
 
 		$seen = $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
 			$wpdb->prepare( "SELECT id FROM {$table} WHERE ip = %s LIMIT 1", $ip ) // phpcs:ignore WordPress.DB.PreparedSQL
@@ -348,27 +411,54 @@ final class ApiLog {
 	public static function by_ip( int $limit = 50 ): array {
 		global $wpdb;
 
-		$table = Schema::api_log_table();
+		// From the ROSTER, not from the request rows. Those are now only kept for first
+		// sightings and failures, so grouping over them would understate every total — and
+		// would empty this table entirely the moment the request list was cleared.
+		$table = Schema::api_addresses_table();
 		$limit = max( 1, min( 200, $limit ) );
 
 		return (array) $wpdb->get_results( // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
 			$wpdb->prepare(
 				"SELECT ip,
-						COUNT(*) AS hits,
-						SUM( CASE WHEN outcome NOT IN ( %s, %s ) THEN 1 ELSE 0 END ) AS failures,
-						MAX( is_new_ip ) AS was_new,
-						MIN( created_at ) AS first_seen,
-						MAX( created_at ) AS last_seen,
-						MAX( user_agent ) AS user_agent
+						requests AS hits,
+						failures,
+						0 AS was_new,
+						first_seen,
+						last_seen,
+						user_agent
 				 FROM {$table}
-				 GROUP BY ip
 				 ORDER BY failures DESC, last_seen DESC
 				 LIMIT %d", // phpcs:ignore WordPress.DB.PreparedSQL
-				self::OK,
-				self::DUPLICATE,
 				$limit
 			)
 		);
+	}
+
+	/**
+	 * Remove ONE address: its roster entry and any request rows it left behind.
+	 *
+	 * The roster is deliberately not aged out — it is the answer to "which machines push
+	 * to this site", and that is worth keeping — so removing an address has to be
+	 * something the owner can do deliberately. Both tables go together: leaving the
+	 * request rows would resurrect the address in the list below while claiming it was
+	 * never seen, and leaving the roster entry would keep counting a machine that has been
+	 * dismissed.
+	 *
+	 * Note the consequence, which is intended: a deleted address is NEW again next time it
+	 * calls, and announces itself accordingly.
+	 */
+	public static function forget_ip( string $ip ): int {
+		global $wpdb;
+
+		if ( '' === $ip ) {
+			return 0;
+		}
+
+		$removed = (int) $wpdb->delete( Schema::api_addresses_table(), array( 'ip' => $ip ), array( '%s' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+		$wpdb->delete( Schema::api_log_table(), array( 'ip' => $ip ), array( '%s' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+		return $removed;
 	}
 
 	/**
@@ -377,18 +467,19 @@ final class ApiLog {
 	public static function summary(): array {
 		global $wpdb;
 
-		$table = Schema::api_log_table();
+		// Totals come from the roster, which counts every request including the routine
+		// accepted ones that no longer earn a row. "New today" is a first_seen inside the
+		// window — the roster is the only place that survives long enough to know.
+		$table = Schema::api_addresses_table();
 		$today = gmdate( 'Y-m-d H:i:s', (int) current_time( 'timestamp' ) - DAY_IN_SECONDS ); // phpcs:ignore WordPress.DateTime.CurrentTimeTimestamp
 
 		$row = $wpdb->get_row( // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
 			$wpdb->prepare(
-				"SELECT COUNT(*) AS requests,
-						SUM( CASE WHEN outcome NOT IN ( %s, %s ) THEN 1 ELSE 0 END ) AS failures,
-						COUNT( DISTINCT ip ) AS addresses,
-						SUM( CASE WHEN is_new_ip = 1 AND created_at > %s THEN 1 ELSE 0 END ) AS new_today
+				"SELECT COALESCE( SUM( requests ), 0 ) AS requests,
+						COALESCE( SUM( failures ), 0 ) AS failures,
+						COUNT(*) AS addresses,
+						SUM( CASE WHEN first_seen > %s THEN 1 ELSE 0 END ) AS new_today
 				 FROM {$table}", // phpcs:ignore WordPress.DB.PreparedSQL
-				self::OK,
-				self::DUPLICATE,
 				$today
 			)
 		);
@@ -401,6 +492,17 @@ final class ApiLog {
 		);
 	}
 
+	/**
+	 * Clear the REQUEST list, keeping the address roster.
+	 *
+	 * Deliberately not both. The roster answers "which machines push to this site", which
+	 * is the part worth keeping and the part that took time to accumulate; the request
+	 * list is a scratchpad of recent first sightings and failures. Wiping the roster as a
+	 * side effect of tidying that scratchpad is the kind of surprise that makes people
+	 * stop pressing buttons — and it cannot be undone.
+	 *
+	 * Addresses are removed one at a time with `forget_ip()`.
+	 */
 	public static function clear(): int {
 		global $wpdb;
 

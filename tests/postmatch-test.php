@@ -367,5 +367,74 @@ $importer->import(
 ok( 'an already-imported image is reused, not re-fetched', empty( $GLOBALS['media_pkgs'] ) && empty( $GLOBALS['sideloaded'] ) );
 ok( 'and it is the one the thumbnail points at', 555 === ( $GLOBALS['thumbnails'][412] ?? 0 ) );
 
+echo "\n=== DELETES: a trashed post is a deletion, not an edit ===\n";
+//
+// THE REPORTED BUG. Core's wp_trash_post() runs in this order:
+//
+//     do_action( 'wp_trash_post', $id );                 // on_delete  → row action 'delete'
+//     wp_update_post( [ 'post_status' => 'trash' ] );    // save_post  → on_save
+//
+// So the delete row was overwritten by the save that trashing itself performs, and the
+// queue held an `update` carrying a package whose status happened to be `trash`. Pushing
+// that took the UPDATE path: where the object matched it was trashed and looked fine;
+// where it did NOT match, the importer did what an update does with an object it cannot
+// find — it INSERTED one. Deleting a page on Staging created a trashed copy on Production.
+$observer_src = (string) php_strip_whitespace( __DIR__ . '/../src/Detection/PostObserver.php' );
+
+ok( 'a trashed post is not trackable as a save', (bool) preg_match( "/'trash' === \\\$post->post_status/", $observer_src ) );
+// Untrashing must still queue normally: wp_untrash_post() fires save_post with the
+// RESTORED status, so a recovered post is the update it looks like.
+ok( 'and the rule keys off status, not the hook', false === strpos( $observer_src, "'wp_untrash_post'" ) );
+
+echo "\n=== DELETES: the package carries enough to be found ===\n";
+//
+// It used to carry only the title and post type. `locate()` tries origin stamp, then id
+// parity, then slug — with no slug the third could never run and the second had nothing but
+// the title to corroborate with. A page renamed before deletion, or one on a cloned site,
+// could not be found at all.
+$service_src = (string) php_strip_whitespace( __DIR__ . '/../src/Client/DeploymentService.php' );
+
+ok( 'a delete package carries the slug', false !== strpos( $service_src, "'post_name' => \$slug" ) );
+ok( 'and the publish date', (bool) preg_match( "/'post_date' => \(string\) \\\$post->post_date/", $service_src ) );
+
+/*
+ * The `__trashed` trap.
+ *
+ * wp_trash_post() RENAMES the slug so the URL is freed for a replacement page. Sending
+ * `about-us__trashed` would be worse than sending nothing: it matches nothing on
+ * Production while looking like a legitimate slug.
+ */
+ok( 'the original slug is preferred', false !== strpos( $service_src, '_wp_desired_post_slug' ) );
+ok( 'and the __trashed suffix is stripped as a fallback', false !== strpos( $service_src, "'__trashed' === substr( \$slug, -9 )" ) );
+// A permanently deleted post is gone; then nothing is sent and the honest failure reports it.
+ok( 'a vanished post simply sends nothing extra', (bool) preg_match( '/! \$post instanceof \\\\WP_Post \) \{\s*return array\(\);/', $service_src ) );
+
+echo "\n=== and those fields actually let the matcher work ===\n";
+//
+// Proving the point rather than asserting the plumbing: a delete package shaped like the
+// new one resolves against a Production post that shares only its slug.
+reset_store();
+add_post( 412, array( 'post_type' => 'page', 'post_name' => 'about-us', 'post_title' => 'Renamed On Prod', 'post_date' => '2020-01-01 00:00:00' ) );
+
+$delete_package = array(
+	'type'        => 'post',
+	'action'      => 'delete',
+	'origin_id'   => 412,
+	'origin_site' => STG,
+	'object'      => array(
+		'post_title' => 'About Us',          // differs from Production
+		'post_type'  => 'page',
+		'post_name'  => 'about-us',          // and this is what finds it
+		'post_date'  => '2026-01-04 09:00:00',
+	),
+);
+
+ok( 'a delete resolves by slug when the title has drifted', 412 === $importer->find_target( $delete_package ) );
+
+// Without the slug — the old package shape — the same delete finds nothing.
+$old_shape = $delete_package;
+unset( $old_shape['object']['post_name'], $old_shape['object']['post_date'] );
+ok( 'and the old title-only package could not', 0 === $importer->find_target( $old_shape ) );
+
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

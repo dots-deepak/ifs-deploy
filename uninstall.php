@@ -16,6 +16,7 @@ $tables = array(
 	$wpdb->prefix . 'ifs_deploy_deployments',
 	$wpdb->prefix . 'ifs_deploy_revisions',
 	$wpdb->prefix . 'ifs_deploy_api_log',
+	$wpdb->prefix . 'ifs_deploy_api_addresses',
 	$wpdb->prefix . 'ifs_deploy_nonces',
 );
 

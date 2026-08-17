@@ -111,6 +111,52 @@ final class SnapshotStore {
 	}
 
 	/**
+	 * Marks a revision that records a CREATION rather than a previous state.
+	 *
+	 * Public because `Rest\RollbackPreviewEndpoint` has to recognise one: there is nothing
+	 * to diff, and offering an empty before/after panel would read as a broken preview.
+	 */
+	public const CREATED_MARKER = 'ifs_deploy_created';
+
+	/**
+	 * Record that this deploy CREATED an object, so the rollback can undo it.
+	 *
+	 * ── WHY A CREATE NEEDED ITS OWN KIND OF SNAPSHOT ───────────────────────────────
+	 *
+	 * Every other snapshot answers "what was here before?". For something the deploy
+	 * created there is no before — so nothing was captured, no revision row existed, and
+	 * the History screen correctly concluded there was nothing to roll back. Reported as
+	 * "no rollback option for media", but it was never about media: pushing a NEW page had
+	 * exactly the same gap. A deploy that cannot be undone is the one case rollback exists
+	 * for.
+	 *
+	 * So the undo of a create is a REMOVAL, and that is what this records. Written after
+	 * the import rather than before it, because the object's id on this site is not known
+	 * until it has been created.
+	 *
+	 * @return int|null Revision id, or null when there is nothing to mark.
+	 */
+	public function capture_creation( int $deployment_id, string $type, int $object_id ): ?int {
+		if ( $object_id <= 0 || '' === $type ) {
+			return null;
+		}
+
+		return $this->insert_revision(
+			$deployment_id,
+			$type,
+			$object_id,
+			array(
+				self::CREATED_MARKER => true,
+				// The row's own object_type is 'post' for media too (an attachment IS a
+				// post), so the real type is carried in the payload — removing an
+				// attachment and trashing a page are different operations.
+				'type'               => $type,
+				'object_id'          => $object_id,
+			)
+		);
+	}
+
+	/**
 	 * Restore a stored revision, dispatching by object type. Returns true on
 	 * success.
 	 */
@@ -125,6 +171,15 @@ final class SnapshotStore {
 			return false;
 		}
 
+		// A creation has no previous state to write back; undoing it means removing what
+		// the deploy added.
+		if ( ! empty( $snapshot[ self::CREATED_MARKER ] ) ) {
+			return $this->undo_creation(
+				(string) ( $snapshot['type'] ?? $row->object_type ),
+				(int) ( $snapshot['object_id'] ?? $row->object_id )
+			);
+		}
+
 		switch ( (string) $row->object_type ) {
 			case 'term':
 				return $this->restore_term( $snapshot );
@@ -135,6 +190,61 @@ final class SnapshotStore {
 			case 'post':
 			default:
 				return $this->restore_post( $snapshot );
+		}
+	}
+
+	/**
+	 * Remove something this deploy created.
+	 *
+	 * REVERSIBLE WHEREVER WORDPRESS ALLOWS IT. A rollback is already the "undo" button;
+	 * making it destroy content outright would leave no way back from a mistaken undo. So
+	 * posts go to Trash, and attachments go to Trash too on sites where media trash is
+	 * enabled — `wp_delete_attachment()` with force = false is the same call the delete
+	 * path uses, and it honours that setting.
+	 *
+	 * Terms and options genuinely have no trash in WordPress, so removing them is the only
+	 * available undo. Both were created by this deploy, so nothing that predates it is
+	 * lost either way.
+	 */
+	private function undo_creation( string $type, int $object_id ): bool {
+		if ( $object_id <= 0 ) {
+			return false;
+		}
+
+		switch ( $type ) {
+			case 'media':
+				return false !== wp_delete_attachment( $object_id, false );
+
+			case 'term':
+				// The taxonomy is not recorded on the marker, so it is read back from the
+				// term itself — which still exists, because this runs before the removal.
+				$term = get_term( $object_id );
+
+				if ( ! $term instanceof \WP_Term ) {
+					return false;
+				}
+
+				return true === wp_delete_term( $object_id, $term->taxonomy );
+
+			case 'menu':
+				return false !== wp_delete_nav_menu( $object_id );
+
+			case 'option':
+				/*
+				 * Unreachable, and deliberately left in place.
+				 *
+				 * `capture_option()` always produces a revision — it records ABSENCE with
+				 * a sentinel — so a newly created option already has a real snapshot and
+				 * never reaches a creation marker. Returning false rather than guessing is
+				 * the right answer if that ever changes: an option's id is derived from its
+				 * name and the name cannot be recovered from it, so there is nothing here
+				 * that could safely be deleted.
+				 */
+				return false;
+
+			case 'post':
+			default:
+				return null !== wp_trash_post( $object_id );
 		}
 	}
 
@@ -152,6 +262,37 @@ final class SnapshotStore {
 		}
 
 		$post_id = (int) $snapshot['post']['ID'];
+
+		/*
+		 * THE ROW HAS TO STILL BE THERE, and this used to assume it was.
+		 *
+		 * `wp_update_post()` on an id that no longer exists updates nothing and returns 0 —
+		 * it does not insert. Everything below then ran against a post that is not there,
+		 * and this returned `true` regardless, so the rollback reported success while
+		 * changing nothing at all.
+		 *
+		 * The case that reaches here is a permanently deleted attachment: the snapshot was
+		 * captured before the removal, the removal destroyed the row AND the file on disk,
+		 * and a rollback cannot bring either back. Re-inserting the row would be worse than
+		 * failing — an attachment pointing at a file that no longer exists is a broken image
+		 * everywhere it appears, presented as a successful restore.
+		 *
+		 * Saying so is the only honest option. A trashed attachment is a different story and
+		 * still restores normally: its row survives, so the status simply goes back.
+		 */
+		if ( ! get_post( $post_id ) instanceof \WP_Post ) {
+			DebugLog::error(
+				'Cannot roll back: the object no longer exists on this site',
+				array(
+					'object_id' => $post_id,
+					'post_type' => (string) ( $snapshot['post']['post_type'] ?? '' ),
+					'title'     => (string) ( $snapshot['post']['post_title'] ?? '' ),
+					'why'       => 'it was permanently deleted, so there is no row to restore and, for media, no file either',
+				)
+			);
+
+			return false;
+		}
 
 		// Restore core fields.
 		wp_update_post( wp_slash( $snapshot['post'] ) );
@@ -294,6 +435,22 @@ final class SnapshotStore {
 	 */
 	private function option_id( string $name ): int {
 		return OptionExporter::option_id( $name );
+	}
+
+	/**
+	 * Drop every restore point belonging to a deployment.
+	 *
+	 * Used after a CANCELLED push has been reverted. The revisions have already served
+	 * their whole purpose at that point, and leaving them would offer a Rollback button
+	 * for a deployment that no longer changed anything — pressing it would re-apply the
+	 * very state the cancel just undid.
+	 *
+	 * @return int Revisions removed.
+	 */
+	public function delete_for_deployment( int $deployment_id ): int {
+		global $wpdb;
+
+		return (int) $wpdb->delete( Schema::revisions_table(), array( 'deployment_id' => $deployment_id ), array( '%d' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 	}
 
 	public function get( int $revision_id ): ?object {

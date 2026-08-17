@@ -78,10 +78,52 @@ $files    = php_files( $root );
 $problems = array();
 $checked  = 0;
 
+/**
+ * Blank the CONTENTS of every string literal, keeping the quotes.
+ *
+ * ── WHY THIS IS NEEDED ─────────────────────────────────────────────────────────────
+ *
+ * The reference patterns below are plain regexes over the source text, so they cannot
+ * tell code from prose — and English written for the screen collides with PHP syntax
+ * more often than it sounds like it would. The button label
+ *
+ *     __( 'Generate new ID (%d)', 'ifs-deploy' )
+ *
+ * matches the `new` pattern exactly: `new` + a capitalised word + `(`. The check then
+ * reported a missing import for a class called `ID` that nothing had ever referenced,
+ * in a file whose only crime was a translated sentence.
+ *
+ * Blanking the contents rather than removing the literals keeps every offset and every
+ * statement boundary intact, so the namespace and `use` patterns still see what they
+ * expect. Comments are already gone — `php_strip_whitespace()` removes those.
+ */
+function blank_strings( string $code ): string {
+	$out = '';
+
+	foreach ( token_get_all( $code ) as $token ) {
+		if ( ! is_array( $token ) ) {
+			$out .= $token;
+			continue;
+		}
+
+		if ( T_CONSTANT_ENCAPSED_STRING === $token[0] ) {
+			// One quote character, kept, so `'…'` stays a syntactically complete literal.
+			$out .= $token[1][0] . $token[1][0];
+			continue;
+		}
+
+		// Heredocs and interpolated strings arrive as their inner text; only that text is
+		// dropped, and the opening/closing tokens around it are left alone.
+		$out .= T_ENCAPSED_AND_WHITESPACE === $token[0] ? '' : $token[1];
+	}
+
+	return $out;
+}
+
 foreach ( $files as $file ) {
 	// Comments stripped: a docblock naming a class it does not use is not a reference, and
 	// several here discuss classes deliberately NOT called.
-	$code = php_strip_whitespace( $file );
+	$code = blank_strings( php_strip_whitespace( $file ) );
 
 	/*
 	 * Unanchored on purpose. `php_strip_whitespace()` collapses the header, so

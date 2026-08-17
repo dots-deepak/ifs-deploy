@@ -28,10 +28,122 @@ final class MediaImporter {
 		$origin_site = (string) ( $package['origin_site'] ?? '' );
 
 		if ( 'delete' === ( $package['action'] ?? 'update' ) ) {
-			$existing = $this->find_existing( $package );
-			if ( $existing ) {
-				wp_delete_attachment( $existing, false );
+			// Trashed ones count: a removal often follows one this plugin already trashed.
+			$existing = $this->find_existing( $package, true );
+
+			// Same rule as PostImporter::delete_post(): a delete that matched nothing has
+			// not succeeded, and reporting it as success is how "the deletion did not
+			// reflect on Production" stayed invisible.
+			if ( ! $existing ) {
+				/*
+				 * EVERY INPUT THE THREE STRATEGIES HAD, recorded together.
+				 *
+				 * "Nothing matched" is the same message whether the file was genuinely never
+				 * deployed, the origin stamp is missing because the site was cloned, or the
+				 * filename differs because this site renamed it on arrival. Those need
+				 * completely different fixes, and telling them apart from the message alone
+				 * is impossible — which is how a mismatch here stayed unexplained.
+				 */
+				DebugLog::error(
+					'Media removal matched nothing on this site',
+					array(
+						'origin_id'      => $origin_id,
+						'origin_site'    => $origin_site,
+						'source_url'     => (string) ( $package['source_url'] ?? '' ),
+						'filename'       => (string) ( $package['filename'] ?? '' ),
+						'id_is_taken'    => get_post( $origin_id ) instanceof \WP_Post,
+						'local_filename' => MediaIdentity::stable_filename( $origin_id ),
+					)
+				);
+
+				return new WP_Error(
+					'ifs_deploy_delete_no_match',
+					sprintf(
+						/* translators: %s: file name */
+						__( 'No media on this site matched "%s", so there was nothing to delete. It was probably never deployed here — Logs & Diagnostics on this site records what was searched for.', 'ifs-deploy' ),
+						(string) ( $package['filename'] ?? $package['attachment']['post_title'] ?? '' )
+					)
+				);
 			}
+
+			/*
+			 * MIRROR THE INTENT. Trashed on Staging means trashed here.
+			 *
+			 * This used to be `wp_delete_attachment( $existing, false )` and nothing else,
+			 * on the reasoning that the receiving site should decide what "remove" means.
+			 * That destroyed files people expected to be able to restore, because
+			 * `MEDIA_TRASH` DEFAULTS TO FALSE:
+			 *
+			 *     // wp-includes/default-constants.php
+			 *     if ( ! defined( 'MEDIA_TRASH' ) ) {
+			 *         define( 'MEDIA_TRASH', false );
+			 *     }
+			 *
+			 * So on any Production that had not explicitly switched media trash on — which
+			 * is most of them — `force = false` fell through to a permanent delete. Trashing
+			 * an image on Staging and pushing it wiped the file from the live site with no
+			 * trash entry to recover from, while the deploy reported success.
+			 *
+			 * Recoverability belongs to the action the operator took, not to the receiving
+			 * site's wp-config. `wp_trash_post()` is called DIRECTLY rather than through
+			 * `wp_delete_attachment( $id, false )` precisely so it does not consult
+			 * `MEDIA_TRASH` here.
+			 */
+			// Defaults to the RECOVERABLE reading when the field is absent, which is what a
+			// package built by a Staging site older than this one looks like. Guessing
+			// wrong toward trash leaves a file to empty; guessing wrong toward delete
+			// destroys one.
+			if ( 'delete' !== ( $package['removal'] ?? 'trash' ) ) {
+				$post = get_post( $existing );
+
+				// Matched an id whose post cannot be read. Reporting success here would be
+				// the same silent lie the no-match branch above exists to prevent.
+				if ( ! $post instanceof \WP_Post ) {
+					return new WP_Error(
+						'ifs_deploy_delete_unreadable',
+						sprintf(
+							/* translators: %d: attachment id */
+							__( 'Media #%d was matched on this site but could not be read, so it was not trashed.', 'ifs-deploy' ),
+							$existing
+						)
+					);
+				}
+
+				// Already trashed here → nothing to do, and that IS the requested state.
+				// Reporting it as a failure would make a second push of the same removal
+				// look like a broken deploy.
+				if ( 'trash' !== $post->post_status && ! wp_trash_post( $existing ) ) {
+					/*
+					 * `wp_trash_post()` returns false when it did not trash. The one case
+					 * that reaches here is `EMPTY_TRASH_DAYS === 0`, where core redirects it
+					 * to a permanent delete — so the object is gone rather than trashed, and
+					 * calling that a success would misreport what this site did with it.
+					 */
+					if ( get_post( $existing ) instanceof \WP_Post ) {
+						return new WP_Error(
+							'ifs_deploy_trash_refused',
+							sprintf(
+								/* translators: %d: attachment id */
+								__( 'Media #%d could not be moved to the Trash on this site.', 'ifs-deploy' ),
+								$existing
+							)
+						);
+					}
+
+					DebugLog::warning(
+						'Trash is disabled on this site (EMPTY_TRASH_DAYS is 0), so the media was deleted outright rather than trashed',
+						array( 'attachment' => $existing )
+					);
+				}
+
+				return array( 'object_id' => $existing, 'created' => false );
+			}
+
+			// Permanent on Staging is permanent here. force = TRUE, so this does not stop
+			// at the trash on a site that has MEDIA_TRASH enabled — the instruction was to
+			// destroy it, and leaving a copy behind would be its own silent divergence.
+			wp_delete_attachment( $existing, true );
+
 			return array( 'object_id' => $existing, 'created' => false );
 		}
 
@@ -42,7 +154,17 @@ final class MediaImporter {
 
 		$attachment = (array) ( $package['attachment'] ?? array() );
 		$filename   = (string) ( $package['filename'] ?? '' );
-		$existing   = $this->find_existing( $package );
+
+		/*
+		 * Trashed ones count here too, and the reason is a duplicate rather than a miss.
+		 *
+		 * Trash an image on Staging, push it (Production trashes it), then restore it on
+		 * Staging and push again. Matching only live attachments would find nothing, so
+		 * this would download the file a second time — and `import_id` would be refused
+		 * because the trashed original still occupies that id. The result is two copies of
+		 * one file, at two different ids, one of them in the trash.
+		 */
+		$existing = $this->find_existing( $package, true );
 
 		// Already present → refresh DB fields only; keep the existing file. Logged,
 		// because "matched an existing attachment" and "uploaded a new file" look
@@ -57,8 +179,49 @@ final class MediaImporter {
 				)
 			);
 
+			$this->restore_if_trashed( $existing );
 			$this->apply_fields( $existing, $package, false );
 			return array( 'object_id' => $existing, 'created' => false );
+		}
+
+		/*
+		 * NOTHING HERE MATCHED, SO THIS FILE IS ABOUT TO BE CREATED. IS ITS ID FREE?
+		 *
+		 * ── WHAT WAS ACTUALLY WRONG ────────────────────────────────────────────────────
+		 *
+		 * `sideload()` asks for the Staging id via `import_id`, but only when that id is
+		 * free — otherwise it quietly let WordPress allocate a fresh one. So an operator
+		 * who uploaded an image as id 1 on Staging could find it sitting at id 5 on
+		 * Production, with nothing anywhere saying so. The IDs were never "not synced":
+		 * they are synced whenever they CAN be, and the failure to sync them was silent.
+		 *
+		 * That silence is the whole bug. A mismatched id is not cosmetic — this importer
+		 * copies meta verbatim, and ACF image fields, gallery fields, `wp-image-N` classes
+		 * and Gutenberg block attributes all store the bare number. An image at a different
+		 * id on Production means every one of those references points somewhere else.
+		 *
+		 * ── WHY THIS REFUSES RATHER THAN RENUMBERING ──────────────────────────────────
+		 *
+		 * Nothing can be done about it from HERE. The id is occupied by a real object on
+		 * this site — moving that object out of the way would break its own references, and
+		 * WordPress has no API for renumbering anything. The only site that can still act
+		 * is Staging, where the attachment may not be referenced yet.
+		 *
+		 * So this refuses BEFORE the download, and says exactly what is in the way. No file
+		 * is fetched, no attachment is created, and the operator gets the choice rather
+		 * than a surprise.
+		 *
+		 * ── WHY ONLY NEW MEDIA ────────────────────────────────────────────────────────
+		 *
+		 * Everything above this point returned already. Media that has been deployed before
+		 * is matched by source URL or origin stamp and never reaches here, so an id
+		 * mismatch that already exists keeps working exactly as it does today. This can
+		 * only ever refuse a file that has never been on this site.
+		 */
+		$conflict = $this->id_conflict( $origin_id );
+
+		if ( $conflict instanceof WP_Error ) {
+			return $conflict;
 		}
 
 		/*
@@ -159,16 +322,31 @@ final class MediaImporter {
 	 *   3. ID parity, ONLY if the file already there is plausibly the same file
 	 *      (matching filename, and not stamped as belonging to another origin).
 	 *
-	 * @param array $package Media package.
+	 * ── WHY TRASHED ATTACHMENTS CAN BE INCLUDED ────────────────────────────────────
+	 *
+	 * `post_status => 'inherit'` is what a live attachment has; a TRASHED one is
+	 * `'trash'` and so is invisible to that filter. That was harmless only for as long as
+	 * a pushed removal destroyed the file outright. Now that a trash on Staging genuinely
+	 * trashes on Production, an attachment this plugin itself put in Production's trash
+	 * could no longer be found — so the follow-up permanent delete reported "nothing
+	 * matched, it was probably never deployed here" about a file it had trashed minutes
+	 * earlier, and re-uploading it created a duplicate at a fresh id.
+	 *
+	 * Off by default, so the preview endpoint and every other caller keep the exact
+	 * behaviour they had. Both import paths opt in.
+	 *
+	 * @param array $package         Media package.
+	 * @param bool  $include_trashed Also match attachments sitting in this site's trash.
 	 */
-	public function find_existing( array $package ): int {
+	public function find_existing( array $package, bool $include_trashed = false ): int {
 		$origin_id   = (int) ( $package['origin_id'] ?? 0 );
 		$origin_site = (string) ( $package['origin_site'] ?? '' );
 		$source_url  = (string) ( $package['source_url'] ?? '' );
 		$filename    = (string) ( $package['filename'] ?? '' );
+		$statuses    = $include_trashed ? array( 'inherit', 'trash' ) : array( 'inherit' );
 
 		if ( '' !== $source_url ) {
-			$by_source = $this->find_by_meta( array( array( 'key' => self::SOURCE_URL_META, 'value' => $source_url ) ) );
+			$by_source = $this->find_by_meta( array( array( 'key' => self::SOURCE_URL_META, 'value' => $source_url ) ), $statuses );
 			if ( $by_source ) {
 				return $by_source;
 			}
@@ -180,7 +358,8 @@ final class MediaImporter {
 					'relation' => 'AND',
 					array( 'key' => self::ORIGIN_ID_META, 'value' => $origin_id ),
 					array( 'key' => self::ORIGIN_SITE_META, 'value' => $origin_site ),
-				)
+				),
+				$statuses
 			);
 			if ( $by_origin ) {
 				return $by_origin;
@@ -192,6 +371,68 @@ final class MediaImporter {
 		}
 
 		return 0;
+	}
+
+	/**
+	 * Refuse to create a new attachment at an id this site has already given away.
+	 *
+	 * Returns null when the id is free (or when there is no id to honour), and a WP_Error
+	 * naming the occupant when it is not. The error carries structured data as well as a
+	 * sentence, because Staging turns it into a dialog offering to renumber — see
+	 * `IdSpaceEndpoint` and `MediaReferences`.
+	 *
+	 * @return WP_Error|null
+	 */
+	private function id_conflict( int $origin_id ) {
+		/**
+		 * Filter whether a new attachment must land on the same id it has on Staging.
+		 *
+		 * Sites that do not store bare attachment ids anywhere — no ACF image fields, no
+		 * galleries, no inline `wp-image-N` classes — can switch this off and let
+		 * WordPress allocate ids freely, which is what happened silently before.
+		 *
+		 * @param bool $required True to refuse the import on a conflict.
+		 * @param int  $origin_id The Staging attachment id.
+		 */
+		if ( $origin_id <= 0 || ! apply_filters( 'ifs_deploy_require_media_id_parity', true, $origin_id ) ) {
+			return null;
+		}
+
+		$occupant = get_post( $origin_id );
+
+		if ( ! $occupant instanceof \WP_Post ) {
+			return null;
+		}
+
+		DebugLog::warning(
+			'Refused a new media import because its Staging id is already taken on this site',
+			array(
+				'staging_id'    => $origin_id,
+				'occupied_by'   => $occupant->ID,
+				'occupant_type' => $occupant->post_type,
+				'occupant_title'=> $occupant->post_title,
+			)
+		);
+
+		return new WP_Error(
+			'ifs_deploy_media_id_taken',
+			sprintf(
+				/* translators: 1: attachment id, 2: post type of the object already at that id, 3: its title */
+				__( 'Media ID mismatch: Staging ID %1$d is not available on production — it is already used by a %2$s, "%3$s". Please resolve the ID conflict before pushing.', 'ifs-deploy' ),
+				$origin_id,
+				$occupant->post_type,
+				$occupant->post_title
+			),
+			array(
+				'staging_id' => $origin_id,
+				'occupant'   => array(
+					'id'     => (int) $occupant->ID,
+					'type'   => (string) $occupant->post_type,
+					'title'  => (string) $occupant->post_title,
+					'status' => (string) $occupant->post_status,
+				),
+			)
+		);
 	}
 
 	/**
@@ -226,7 +467,30 @@ final class MediaImporter {
 			return false;
 		}
 
-		$local = basename( (string) get_attached_file( $origin_id ) );
+		/*
+		 * COMPARED BY THE ORIGINAL NAME, NOT THE ONE ON DISK HERE.
+		 *
+		 * `wp_upload_bits()` never overwrites, so a file that arrived as `photo.png` is
+		 * stored as `photo-1.png` whenever this site already held an unrelated `photo.png`.
+		 * Comparing the local name then failed for the rest of that file's life:
+		 *
+		 *   Staging sends  photo.png
+		 *   Production has photo-1.png   → no match, on every push, for ever
+		 *
+		 * On a site whose attachments carry no origin stamp — a clone rather than a
+		 * deployment — id parity is the ONLY strategy left, so this comparison failing
+		 * meant the object could not be found at all. A removal then reported "nothing
+		 * matched, it was probably never deployed here" about a file plainly sitting there
+		 * at the very same id, and because the match also feeds `snapshot_for()`, no
+		 * restore point was recorded and the History screen offered no Rollback button.
+		 * One comparison, both symptoms.
+		 *
+		 * `MediaIdentity::stable_filename()` reads the name back out of the recorded source
+		 * URL and falls back to the local name only when there is no stamp — which is what
+		 * keeps this precise rather than lax: a `photo-1.png` genuinely uploaded here by
+		 * hand still compares as different, because it really is a different image.
+		 */
+		$local = MediaIdentity::stable_filename( $origin_id );
 
 		return '' !== $local && strtolower( $local ) === strtolower( $filename );
 	}
@@ -236,11 +500,16 @@ final class MediaImporter {
 	 *
 	 * @param array $meta_query
 	 */
-	private function find_by_meta( array $meta_query ): int {
+	private function find_by_meta( array $meta_query, array $statuses = array( 'inherit' ) ): int {
 		$query = new \WP_Query(
 			array(
 				'post_type'              => 'attachment',
-				'post_status'            => 'inherit',
+				/*
+				 * Listed explicitly rather than using 'any', which would NOT include
+				 * 'trash' — WordPress builds 'any' from statuses that are not flagged
+				 * `exclude_from_search`, and trash is exactly such a status.
+				 */
+				'post_status'            => $statuses,
 				'posts_per_page'         => 1,
 				'fields'                 => 'ids',
 				'no_found_rows'          => true,
@@ -323,16 +592,7 @@ final class MediaImporter {
 			$filename = basename( wp_parse_url( $source_url, PHP_URL_PATH ) ?: 'file' );
 		}
 
-		// Pass the attachment's own date so the file lands in the same year/month
-		// folder as on Staging. Without it wp_upload_bits() uses today's date, so a
-		// file uploaded in August but deployed in September would move to 2026/09 —
-		// a needless second way for the URL to diverge.
-		$upload = wp_upload_bits(
-			$filename,
-			null,
-			(string) file_get_contents( $tmp ), // phpcs:ignore WordPress.WP.AlternativeFunctions
-			$this->upload_time( $attachment )
-		);
+		$upload = $this->store_file( $tmp, $filename, $this->upload_time( $attachment ) );
 		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 
 		if ( ! empty( $upload['error'] ) ) {
@@ -363,6 +623,75 @@ final class MediaImporter {
 		wp_update_attachment_metadata( (int) $attachment_id, $metadata );
 
 		return (int) $attachment_id;
+	}
+
+	/**
+	 * Move a downloaded file into the uploads directory WITHOUT reading it into memory.
+	 *
+	 * ── WHY THIS REPLACED wp_upload_bits() ─────────────────────────────────────────
+	 *
+	 * That call needs the file's CONTENTS as a string, so this used to run
+	 * `file_get_contents( $tmp )` and hand the whole thing over — PHP then held the entire
+	 * file in memory and wrote it straight back out to disk. A 40 MB upload therefore
+	 * needed 40 MB of memory, often twice over while the string was copied, on top of
+	 * everything WordPress already has loaded. That is exactly where a large media push
+	 * died, and it died with a fatal rather than a message.
+	 *
+	 * The file is already on disk when we get here — `download_url()` put it there. Moving
+	 * it costs no memory at all whatever its size, so the limit stops being PHP's memory
+	 * and goes back to being the configured maximum.
+	 *
+	 * Everything wp_upload_bits() did that matters is kept:
+	 *
+	 *  - the attachment's OWN date decides the year/month folder, so a file uploaded in
+	 *    August but deployed in September does not land in `2026/09` and diverge (§12);
+	 *  - `wp_unique_filename()` gives the same non-overwriting behaviour, which
+	 *    `MediaUrlResolver` and `MediaIdentity` both depend on;
+	 *  - the return shape is `wp_upload_bits()`'s, so the caller is unchanged.
+	 *
+	 * `rename()` first because it is atomic on the same filesystem; `copy()` as the
+	 * fallback, since the temp directory is not always on the same mount.
+	 *
+	 * @return array{file:string,url:string,type:string,error:string|false}
+	 */
+	private function store_file( string $tmp, string $filename, ?string $time ): array {
+		$dir = wp_upload_dir( $time );
+
+		if ( ! empty( $dir['error'] ) ) {
+			return array( 'file' => '', 'url' => '', 'type' => '', 'error' => (string) $dir['error'] );
+		}
+
+		$filename = wp_unique_filename( $dir['path'], $filename );
+		$target   = $dir['path'] . '/' . $filename;
+
+		if ( ! @rename( $tmp, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( ! @copy( $tmp, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return array(
+					'file'  => '',
+					'url'   => '',
+					'type'  => '',
+					'error' => sprintf(
+						/* translators: %s: destination directory */
+						__( 'The uploads directory could not be written to (%s). Check its permissions on this site.', 'ifs-deploy' ),
+						$dir['path']
+					),
+				);
+			}
+		}
+
+		// Match what WordPress gives its own uploads, or the file is unreadable over HTTP
+		// on hosts whose umask is restrictive.
+		$permissions = defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : ( fileperms( ABSPATH . 'index.php' ) & 0777 | 0644 );
+		@chmod( $target, $permissions ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		$type = wp_check_filetype( $filename );
+
+		return array(
+			'file'  => $target,
+			'url'   => $dir['url'] . '/' . $filename,
+			'type'  => (string) ( $type['type'] ?? '' ),
+			'error' => false,
+		);
 	}
 
 	/**
@@ -408,6 +737,32 @@ final class MediaImporter {
 	/**
 	 * Apply alt text, identity stamps, and (on create) parent + transferable meta.
 	 */
+	/**
+	 * Bring a matched attachment back out of this site's trash.
+	 *
+	 * An UPDATE says the file should exist on Production. If the match is sitting in the
+	 * trash — almost always because this plugin put it there for an earlier removal that
+	 * has since been undone on Staging — refreshing its fields and leaving it trashed
+	 * would report success while the image stayed missing from every page using it.
+	 *
+	 * `wp_untrash_post()` restores the status WordPress recorded in `_wp_trash_meta_status`
+	 * at trash time, which for an attachment is `inherit`.
+	 */
+	private function restore_if_trashed( int $attachment_id ): void {
+		$post = get_post( $attachment_id );
+
+		if ( ! $post instanceof \WP_Post || 'trash' !== $post->post_status ) {
+			return;
+		}
+
+		wp_untrash_post( $attachment_id );
+
+		DebugLog::info(
+			'Media was in this site\'s trash and has been restored by an update',
+			array( 'attachment' => $attachment_id )
+		);
+	}
+
 	private function apply_fields( int $attachment_id, array $package, bool $created ): void {
 		$alt = (string) ( $package['alt'] ?? '' );
 		if ( '' !== $alt ) {

@@ -51,28 +51,68 @@ final class ImportManager {
 	 * @return array{uuid:string,status:string,results:array<int,array>}
 	 */
 	public function run( string $deployment_uuid, array $objects ): array {
-		$deployment_id = $this->deployments->create( $deployment_uuid, 0, DeploymentRepository::STATUS_PENDING );
+		/*
+		 * ONE DEPLOYMENT RECORD PER UUID, however many requests it arrives in.
+		 *
+		 * A push is no longer necessarily one HTTP request: the sending site can split a
+		 * large one into batches so it can report progress and so no single request has to
+		 * survive a hundred media downloads. Every batch carries the SAME uuid.
+		 *
+		 * Creating a record per request would have made each batch its own deployment —
+		 * and snapshots hang off the deployment id, so ROLLBACK WOULD ONLY EVER RESTORE
+		 * THE LAST BATCH. That is the trap this reuse exists to avoid, and it is the
+		 * reason batching was deferred until now (§18).
+		 *
+		 * Looking the record up by uuid also makes a retried batch harmless: it lands in
+		 * the same deployment rather than fragmenting the history.
+		 */
+		$existing      = $this->deployments->get_by_uuid( $deployment_uuid );
+		$deployment_id = null !== $existing
+			? (int) $existing->id
+			: $this->deployments->create( $deployment_uuid, 0, DeploymentRepository::STATUS_PENDING );
 
-		$results   = array();
-		$succeeded = 0;
+		$results = array();
 
 		foreach ( $this->in_dependency_order( $objects ) as $package ) {
 			$results[] = $this->import_one( (array) $package, $deployment_id );
 		}
 
-		foreach ( $results as $result ) {
+		/*
+		 * The status describes the WHOLE deployment, not this batch.
+		 *
+		 * Earlier batches are already recorded, so they are read back and merged before
+		 * the verdict is recomputed. Without that, a final batch of one successful object
+		 * would report `success` for a deployment whose earlier half had failed.
+		 */
+		$previous = null !== $existing ? json_decode( (string) $existing->deployment_log, true ) : array();
+		$previous = is_array( $previous ) ? $previous : array();
+
+		$all       = array_merge( $previous, $results );
+		$succeeded = 0;
+
+		foreach ( $all as $result ) {
 			if ( ! empty( $result['ok'] ) ) {
 				++$succeeded;
 			}
 		}
 
-		$status = $this->resolve_status( count( $results ), $succeeded );
-		$this->deployments->update( $deployment_id, $status, $results );
+		$status = $this->resolve_status( count( $all ), $succeeded );
+		$this->deployments->update( $deployment_id, $status, $all );
 
 		return array(
-			'uuid'    => $deployment_uuid,
-			'status'  => $status,
+			'uuid'   => $deployment_uuid,
+			'status' => $status,
+
+			// Only THIS batch's results: the sender maps them to its own queue rows, and
+			// re-sending earlier ones would mark the same rows over and over.
 			'results' => $results,
+
+			// Totals for the whole deployment, so the sender can report progress that
+			// accounts for what previous batches did.
+			'totals'  => array(
+				'objects'   => count( $all ),
+				'succeeded' => $succeeded,
+			),
 		);
 	}
 
@@ -95,6 +135,21 @@ final class ImportManager {
 		'menu'   => 3,
 		'option' => 4,
 	);
+
+	/**
+	 * Where an object type sits in the import order.
+	 *
+	 * Exposed because a BATCHED push has to apply this order on the SENDING side, across
+	 * the whole push, before it splits anything up. Sorting within a batch would only
+	 * order each batch against itself — a post could still be sent in batch 1 and the
+	 * media it references in batch 2, which is exactly the dependency this order exists
+	 * to prevent (§12: PostImporter can only resolve an attachment that already exists).
+	 *
+	 * One definition, read from both sides, so the two cannot disagree about it.
+	 */
+	public static function rank( string $type ): int {
+		return self::TYPE_ORDER[ $type ] ?? 99;
+	}
 
 	/**
 	 * Sort a batch into dependency order, preserving the sender's relative order
@@ -185,13 +240,47 @@ final class ImportManager {
 				)
 			);
 
+			/*
+			 * The CODE and DATA travel back, not just the sentence.
+			 *
+			 * Staging cannot act on prose. A media id conflict is the case that forced
+			 * this: the operator is offered a "renumber on Staging" dialog, and building
+			 * it needs the id that is taken and what is occupying it as fields, not as
+			 * words inside a translated string.
+			 *
+			 * `data` is whatever the importer attached and is echoed verbatim, so it must
+			 * never carry anything about this site beyond what the message already says.
+			 */
+			$data = $result->get_error_data();
+
 			return array(
 				'ok'        => false,
 				'type'      => $type,
 				'origin_id' => $origin_id,
 				'title'     => $title,
+				'code'      => (string) $result->get_error_code(),
 				'error'     => $result->get_error_message(),
+				'data'      => is_array( $data ) ? $data : array(),
 			);
+		}
+
+		$object_id = (int) ( $result['post_id'] ?? $result['object_id'] ?? 0 );
+		$created   = ! empty( $result['created'] );
+
+		/*
+		 * A CREATE GETS ITS OWN RESTORE POINT, recorded after the fact.
+		 *
+		 * `snapshot_for()` runs BEFORE the import and captures what was here already — so
+		 * for something that did not exist yet it correctly captured nothing and returned
+		 * 0. The History screen then offered no Rollback button, because as far as it could
+		 * tell there was nothing to go back to.
+		 *
+		 * There is: the undo of a create is a removal. It could not be recorded earlier
+		 * because the object's id on this site does not exist until it has been created,
+		 * which is why this sits here and not with the other snapshot.
+		 */
+		if ( 0 === $revision_id && $created && $object_id > 0 ) {
+			$revision_id = (int) ( $this->snapshots->capture_creation( $deployment_id, $type, $object_id ) ?? 0 );
 		}
 
 		return array(
@@ -199,8 +288,8 @@ final class ImportManager {
 			'type'        => $type,
 			'origin_id'   => $origin_id,
 			'title'       => $title,
-			'object_id'   => (int) ( $result['post_id'] ?? $result['object_id'] ?? 0 ),
-			'created'     => ! empty( $result['created'] ),
+			'object_id'   => $object_id,
+			'created'     => $created,
 			'revision_id' => $revision_id,
 		);
 	}
@@ -224,9 +313,22 @@ final class ImportManager {
 			case 'option':
 				return (int) ( $this->snapshots->capture_option( $deployment_id, (string) ( $package['name'] ?? '' ) ) ?? 0 );
 			case 'media':
-				// An attachment is a post; snapshot its DB record if it already
-				// exists (the binary file itself is not versioned).
-				$existing = $this->media_importer->find_existing( $package );
+				/*
+				 * An attachment is a post; snapshot its DB record if it already exists (the
+				 * binary file itself is not versioned).
+				 *
+				 * TRASHED ONES INCLUDED — the `true` is load-bearing. This matcher decides
+				 * whether a restore point exists, and it was looking only at LIVE
+				 * attachments while the import beside it looked in the trash as well. So
+				 * anything sitting in this site's trash was snapshot-invisible: the removal
+				 * or update went through, `revision_id` came back 0, and the History screen
+				 * showed no Rollback button because as far as it could tell nothing had been
+				 * overwritten. Reported as "media ka rollback track nahi ban raha".
+				 *
+				 * The two calls have to agree. If the import can act on an object, the
+				 * snapshot has to have captured that same object first.
+				 */
+				$existing = $this->media_importer->find_existing( $package, true );
 				return $existing ? (int) ( $this->snapshots->capture( $deployment_id, $existing ) ?? 0 ) : 0;
 			case 'menu':
 				$slug = (string) ( $package['menu']['slug'] ?? '' );

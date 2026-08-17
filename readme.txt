@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.5.0
+Stable tag: 0.11.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -110,6 +110,160 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 
 == Changelog ==
 
+= 0.11.1 =
+Fixes for media rollback and for removals that could not find their target.
+
+* **Media changes now record a restore point when Production's copy is in the Trash.** The
+  snapshot lookup searched only live attachments while the import beside it searched the
+  Trash as well, so anything already trashed there was changed with no restore point — and
+  the History screen showed no Rollback button, because as far as it could tell nothing had
+  been overwritten.
+* **A rollback that cannot restore anything now says so** instead of reporting success. The
+  case is a permanently deleted item: the row and, for media, the file are both gone, so
+  there is nothing to put back.
+* **Removals now find media this site renamed on arrival.** A file that arrived as
+  `photo.png` where an unrelated `photo.png` already existed is stored as `photo-1.png`, and
+  the last-resort match compared that local name — so once Staging's own URL had changed as
+  well, the file could not be found at all and the removal reported that it had never been
+  deployed.
+* **A removal that matches but cannot be applied is reported as a failure**, not a success,
+  and a removal that matches nothing now records everything it searched for in Logs &
+  Diagnostics so the cause can actually be identified.
+
+= 0.11.0 =
+Trashing media now trashes it on Production instead of destroying it, and a media item that
+cannot keep its ID says so instead of quietly changing it.
+
+* **Moving media to the Trash no longer destroys it on Production.** The removal was sent
+  as "remove this" and the receiving site decided what that meant — and WordPress leaves
+  media trash switched OFF unless a site turns it on, so most Production sites deleted the
+  file outright while the deploy reported success. A trash on Staging is now a trash on
+  Production whatever that site's setting is, and a permanent delete is permanent on both.
+* **Emptying the Trash after pushing a trash now works.** Once removals genuinely trashed
+  things on Production, the plugin could no longer find what it had trashed — so the
+  follow-up permanent delete reported that the item had never been deployed. Both matchers
+  now look in the Trash as well.
+* **Re-saving a file you had deleted brings it back.** Pushing an update for media sitting
+  in Production's Trash used to report success while the image stayed missing from every
+  page using it.
+* **Permanently deleting a page now removes it from Production**, instead of only moving it
+  to the Trash there.
+* **Media that cannot keep its ID is reported instead of silently renumbered.** A new image
+  is created on Production with the same ID it has on Staging, which is what makes gallery
+  fields, featured images and inline images keep working. When that ID is already taken —
+  by anything, including a page — the file used to be uploaded under a different ID with no
+  indication. The push now stops and names what is occupying the ID, before downloading
+  anything.
+* **And offers to fix it.** If the file is not yet used anywhere on Staging, you are offered
+  a new ID that is free on both sites. If it IS used, the dialog says what is using it and
+  declines — changing the ID of a file that is referenced would break those references
+  silently, and WordPress provides no safe way to do it.
+
+= 0.10.0 =
+Deleting content now actually syncs, permission refusals say so, and the push dialog
+describes what it is doing.
+
+* **Deleting a page or media item now reaches Production.** Four separate faults were
+  behind this. Moving something to the Trash quietly cancelled its own removal, because
+  the save that trashing performs replaced the record a moment after it was written — so a
+  deletion was pushed as an edit, and on a site where it could not be matched it created a
+  trashed copy instead of removing anything. A removal also carried too little to identify
+  what it referred to, so a page renamed before deletion could not be found. And when
+  nothing matched, the push reported success anyway.
+* **Media moved to the Trash was not tracked at all** on sites where "Delete" means "Move
+  to Trash". It is now. (Pushing it still destroyed the file on Production rather than
+  trashing it — see 0.11.0, which is the release that actually fixed that.)
+* **Pushing changes you do not own explains itself.** Pressing Push All on a colleague's
+  changes used to do nothing at all — no dialog, no message — and Push Selected reported
+  "Nothing is selected" when several rows were selected. Both now say what the problem is.
+  The same applies to Ignore. If a selection is part yours and part someone else's, the
+  confirmation says how many will be left out **before** you confirm.
+* **The push dialog now says what it is doing** — which stage it has reached, the item
+  being sent, and an estimated time remaining measured from the work already done rather
+  than guessed.
+* **Saving settings uses the plugin's own notification**, like every other action, instead
+  of the standard WordPress notice.
+
+= 0.9.0 =
+Large pushes now show real progress and can be cancelled, media rollback works, and
+several failures that were reported as successes now say what went wrong.
+
+* **Pushes are sent in batches, with a real progress bar.** A push used to be one long
+  request that could exceed the server's time limit on a large set — and there was nothing
+  to report from inside it. It is now split into batches, so the bar reflects what has
+  actually completed rather than an estimate.
+* **A push can be cancelled.** Anything already sent is undone on Production, and your
+  changes stay in Pending Changes until you push them again or remove them yourself. A
+  cancelled push shows as one entry in Deployment History, not as a deploy plus an undo.
+* **Rollback now works for newly added content, including media.** Previously a rollback
+  could only restore a previous version, so anything the deploy had CREATED had nothing to
+  go back to and no Rollback button. Undoing a creation now removes it — a page goes to
+  Trash, where it can still be recovered.
+* **Large media files no longer fail.** The file was being loaded into memory in full
+  before being saved; it is now moved into place directly, so size no longer costs memory.
+* **A delete that matches nothing on Production is reported instead of passing silently.**
+  Deleting a page or media item on staging and pushing it could report success while the
+  item stayed live. The message now says whether it was never deployed there, or whether
+  the two copies need linking with Compare & Sync.
+* **Pushing someone else's changes gives a proper message.** Only the person who made a
+  change — or an administrator — can push it. Selecting a colleague's item used to end at
+  "No items selected", which was neither true nor helpful.
+* **Notifications are more prominent**, and an error now stays on screen until dismissed.
+
+= 0.8.0 =
+Only real people's changes are tracked, and every action reports itself the same way.
+
+* **Changes with no logged-in user are no longer tracked.** Entries showing "Changed By:
+  Unknown" came from background work — cron, WP-CLI, an async cleanup — rather than from
+  someone on the team, and could not be reviewed in any useful sense. Applies to every
+  content type. A site that does edit content by script can turn tracking back on with the
+  `ifs_deploy_track_without_user` filter, and every skip is recorded when Detailed logging
+  is on, so nothing goes missing unnoticed.
+* **Deleting a plugin or theme archive no longer creates a pending change.** Uploading one
+  was already ignored; deleting one was not, so a ZIP could still appear in the list as
+  something to delete from Production — which had never been given it in the first place.
+* **Existing entries of both kinds are removed on upgrade.** Only pending ones; anything
+  already deployed or ignored is left as the record it is.
+* **Every action now reports itself the same way.** Rollback, Push, Ignore, Sync IDs, Clear
+  History and Clear Log each used to refresh the screen on their own schedule, which meant
+  some results were wiped from view a moment after appearing — rollback among them. All of
+  them now show the same message, in the same place, and it survives the refresh.
+
+= 0.7.0 =
+A much quieter API log, a callers list that survives clearing, and a warning that no
+longer cries wolf.
+
+* **Accepted API requests are no longer listed individually.** Every step of a deploy is
+  an API call, so a working pair was writing several "accepted" rows per push, for ever.
+  Only first sightings of an address and rejected requests are listed now — a list where
+  every entry reads "fine" is where real failures go to hide. Nothing is lost: accepted
+  requests are still counted against their address.
+* **The list of calling addresses is kept separately and survives Clear.** Clearing the
+  request list no longer wipes the record of which machines push to this site. Each
+  address can be removed individually with **Forget**, which also deletes its requests.
+* **Fixed a warning on every deploy.** Pushing a page could log "Removed disallowed
+  markup" while removing nothing at all: the content filter rebuilds every tag it keeps,
+  and the resulting harmless change in formatting was being reported as a removal.
+  Anything genuinely removed is now named exactly — the attribute or tag, rather than
+  "disallowed markup".
+
+= 0.6.0 =
+Plugin and theme archives are no longer tracked, and results are shown as toasts.
+
+* **Uploading a plugin or theme ZIP no longer creates a pending change.** Archives and
+  executables are not content, and IFS Deploy deliberately never deploys code — so a
+  deploy must not be able to carry a plugin installer to the live site. Images, PDFs,
+  video and audio are unaffected. A site that genuinely publishes a downloadable archive
+  can allow it again with the `ifs_deploy_track_attachment` filter.
+* **Success and error messages are now toasts.** They used to be a standard admin notice
+  at the top of the panel, which meant an action taken from halfway down a long list
+  reported itself off-screen — and the actions that reload the page destroyed the notice a
+  moment after it appeared. Messages now appear against the corner of the screen wherever
+  you are scrolled to, and survive the reload.
+* Errors stay until dismissed; only success messages fade on their own. Escape clears
+  them, and each carries the right screen-reader role so failures are announced rather
+  than missed.
+
 = 0.5.0 =
 Recognises WPML media translations directly, and adds a logging switch.
 
@@ -202,10 +356,20 @@ automatically on each (schema versions 6 and 7).
 
 == Upgrade Notice ==
 
-= 0.5.0 =
-Recognises WPML media translations directly, adds a logging switch, and restores missing
-admin styling. Includes everything since 0.2.0, so update both sites together; the
-database upgrade runs itself.
+= 0.11.1 =
+Fixes media rollback not being recorded, and removals that could not find their target.
+**Install on Production too** — every fix in this release runs on the receiving side.
+
+= 0.11.0 =
+Trashing media no longer destroys it on Production, and media that cannot keep its ID says
+so instead of changing it quietly. **Both sites must be updated** — Production is the side
+that decides how a removal is applied, and the new ID check needs a route it does not yet
+have. No database upgrade.
+
+= 0.10.0 =
+Deleting content now syncs to Production, permission refusals explain themselves, and the
+push dialog reports its own progress. Includes everything since 0.2.0, so update both sites
+together; the database upgrade runs itself.
 
 = 0.3.0 =
 Fixes duplicate Pending Changes entries and adds a change preview for media. Includes

@@ -224,6 +224,7 @@ final class LogsPage {
 		echo '</tbody></table>';
 
 		echo '<p class="dp-help">' . esc_html__( 'Allowing an address restricts the API to the allow list — every address not on it is refused. Blocking takes effect immediately and always wins over allowing.', 'ifs-deploy' ) . '</p>';
+		echo '<p class="dp-help">' . esc_html__( 'This list is kept until you remove an address yourself — clearing the requests below does not touch it. Forget deletes an address and its requests; it will be reported as new the next time it calls.', 'ifs-deploy' ) . '</p>';
 	}
 
 	/**
@@ -264,6 +265,20 @@ final class LogsPage {
 			);
 		}
 
+		/*
+		 * Forget the address entirely.
+		 *
+		 * The roster is not aged out — it is the record of which machines call this site,
+		 * and Clear deliberately leaves it alone — so removing one has to be a deliberate
+		 * act. Kept visually apart from Allow/Block: those change a RULE, this deletes
+		 * history, and the two should not read as variations of one another.
+		 */
+		$html .= sprintf(
+			'<button type="button" class="button button-small ifs-deploy-forget-ip" data-ip="%1$s">%2$s</button>',
+			esc_attr( $ip ),
+			esc_html__( 'Forget', 'ifs-deploy' )
+		);
+
 		return $html . '</div>';
 	}
 
@@ -297,7 +312,11 @@ final class LogsPage {
 			return;
 		}
 
-		echo '<p class="dp-help">' . esc_html__( 'Newest first. Repeated rejections from one address within five minutes are collapsed into a single row, so a flood cannot fill this table.', 'ifs-deploy' ) . '</p>';
+		// Says what this list IS, because it is no longer everything. A routine accepted
+		// request is counted against its address above and left out here — otherwise a
+		// working pair wrote several rows per deploy for ever, and a list where every entry
+		// reads "fine" is where failures go to hide.
+		echo '<p class="dp-help">' . esc_html__( 'Newest first. Only first sightings of an address and rejected requests are listed — accepted requests are counted against their address above rather than listed here. Repeated rejections from one address within five minutes are collapsed into a single row, so a flood cannot fill this table.', 'ifs-deploy' ) . '</p>';
 
 		// Says what is NOT here. A log that quietly omits rows is worse than a noisy one, so
 		// the omission is stated on the screen and the setting that controls it is named.

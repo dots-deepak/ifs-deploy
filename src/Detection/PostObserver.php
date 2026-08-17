@@ -165,6 +165,30 @@ final class PostObserver {
 			return false;
 		}
 
+		/*
+		 * A TRASHED POST IS A DELETION, NOT AN EDIT — and this is why deletes did not sync.
+		 *
+		 * Core's `wp_trash_post()` runs in this order:
+		 *
+		 *     do_action( 'wp_trash_post', $id );                    // on_delete → 'delete'
+		 *     wp_update_post( [ 'post_status' => 'trash' ] );       // save_post  → on_save
+		 *
+		 * So the delete row this plugin had just written was immediately overwritten by the
+		 * save that trashing itself performs, and the queue ended up holding an `update`
+		 * carrying a package whose status happened to be `trash`.
+		 *
+		 * Pushing that took the UPDATE path on the far side. Where the object matched, it
+		 * trashed it and looked like it had worked; where it did NOT match, the importer
+		 * did what an update does with an object it cannot find — it INSERTED one, so
+		 * deleting a page on Staging quietly created a trashed copy of it on Production.
+		 *
+		 * Untrashing is unaffected: `wp_untrash_post()` fires `save_post` with the RESTORED
+		 * status, not `trash`, so a recovered post is queued as the update it is.
+		 */
+		if ( 'trash' === $post->post_status ) {
+			return false;
+		}
+
 		return in_array( $post->post_type, Config::tracked_post_types(), true );
 	}
 }

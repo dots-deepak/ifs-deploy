@@ -95,9 +95,11 @@ final class RestController {
 		( new PingEndpoint() )->register();
 		( new ImportEndpoint() )->register();
 		( new RollbackEndpoint() )->register();
+		( new CancelEndpoint() )->register();
 		( new IndexEndpoint() )->register();
 		( new LinkEndpoint() )->register();
 		( new ObjectEndpoint() )->register();
+		( new IdSpaceEndpoint() )->register();
 		( new RollbackPreviewEndpoint() )->register();
 		( new SignatureEndpoint() )->register();
 	}

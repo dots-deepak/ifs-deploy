@@ -400,7 +400,8 @@ foreach ( $sql_files as $file ) {
 	 * Interpolation into SQL is only safe for two things, both allowed here by name:
 	 *
 	 *  - IDENTIFIERS that cannot be parameterised: $table, $queue, $deployments,
-	 *    $revisions, $wpdb->… — all built from $wpdb->prefix, never from a request.
+	 *    $revisions, $addresses, $api_log, $wpdb->… — all built from $wpdb->prefix,
+	 *    never from a request.
 	 *  - $charset_collate, the DDL fragment from $wpdb->get_charset_collate().
 	 *  - $placeholders, a run of literal `%d` tokens produced by
 	 *    array_fill( 0, count( $ids ), '%d' ). The VALUES still go through prepare();
@@ -409,7 +410,7 @@ foreach ( $sql_files as $file ) {
 	 *
 	 * Anything else interpolated into a query string is a finding.
 	 */
-	if ( preg_match_all( '/"[^"]*(SELECT|INSERT|UPDATE|DELETE)[^"]*\{\$(?!table|wpdb|placeholders|queue|deployments|revisions|charset_collate)[a-z_]+\}[^"]*"/i', $src, $m ) ) {
+	if ( preg_match_all( '/"[^"]*(SELECT|INSERT|UPDATE|DELETE)[^"]*\{\$(?!table|wpdb|placeholders|queue|deployments|revisions|addresses|api_log|charset_collate)[a-z_]+\}[^"]*"/i', $src, $m ) ) {
 		foreach ( $m[0] as $hit ) {
 			$unsafe[] = basename( $file ) . ': ' . substr( $hit, 0, 90 );
 		}

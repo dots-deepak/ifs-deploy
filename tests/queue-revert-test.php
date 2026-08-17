@@ -7,7 +7,18 @@ declare(strict_types=1);
  */
 
 function current_time( $t ) { return '2026-08-05 12:00:00'; }
-function get_current_user_id() { return 7; }
+
+// Overridable, so the "no logged-in user" rule can be exercised against the real upsert().
+$GLOBALS['dp_user'] = 7;
+function get_current_user_id() { return $GLOBALS['dp_user']; }
+function current_filter() { return 'save_post'; }
+function apply_filters( $tag, $value, ...$args ) {
+	foreach ( $GLOBALS['dp_filters'][ $tag ] ?? array() as $cb ) { $value = $cb( $value, ...$args ); }
+	return $value;
+}
+function add_filter( $tag, $cb, $p = 10, $a = 1 ) { $GLOBALS['dp_filters'][ $tag ][] = $cb; return true; }
+function remove_all_filters( $tag ) { unset( $GLOBALS['dp_filters'][ $tag ] ); }
+$GLOBALS['dp_filters'] = array();
 
 /** In-memory stand-in for the queue table. */
 class FakeWpdb {
@@ -63,8 +74,16 @@ class FakeWpdb {
 
 $GLOBALS['wpdb'] = new FakeWpdb();
 
+require __DIR__ . '/../src/Support/Logger.php';
+require __DIR__ . '/../src/Support/Config.php';
+require __DIR__ . '/../src/Support/DebugLog.php';
 require __DIR__ . '/../src/Support/Schema.php';
 require __DIR__ . '/../src/Queue/QueueRepository.php';
+
+// DebugLog only runs on the skip path, and only writes when Detailed logging is on.
+function get_option( $n, $d = false ) { return $GLOBALS['dp_options'][ $n ] ?? $d; }
+function update_option( $n, $v, $a = null ) { $GLOBALS['dp_options'][ $n ] = $v; return true; }
+$GLOBALS['dp_options'] = array();
 
 use IfsDeploy\Queue\QueueRepository;
 
@@ -180,6 +199,51 @@ ok( 'and the latest subtype',      '' === (string) $media->object_subtype );
 // (type, object_id), and ids are only unique WITHIN a type.
 $q->upsert( 'term', 'category', 700, 'News', 'update', md5( 't1' ) );
 ok( 'a term with the same id is a separate row', 2 === count( $GLOBALS['wpdb']->rows ) - $before );
+
+echo "\n=== 13. a change with NO LOGGED-IN USER is not queued ===\n";
+//
+// Reported as "Changed By: Unknown" rows nobody had asked for — cron, WP-CLI or an async
+// cleanup touching content. The queue exists so a team can review what THEY changed; a row
+// with no author cannot be reviewed in that sense.
+//
+// Gated in upsert() rather than in each observer, because that is the single point every
+// content type passes through. These cases prove it holds for ALL of them, not just posts.
+$before = count( $GLOBALS['wpdb']->rows );
+
+$GLOBALS['dp_user'] = 0;
+
+ok( 'a post is not queued', false === $q->upsert( 'post', 'page', 800, 'Ghost', 'update', md5( 'g' ) ) );
+ok( 'a term is not queued', false === $q->upsert( 'term', 'category', 801, 'News', 'update', md5( 'g' ) ) );
+ok( 'an option is not queued', false === $q->upsert( 'option', '', 802, 'options_x', 'update', md5( 'g' ) ) );
+ok( 'media is not queued', false === $q->upsert( 'media', 'image/png', 803, 'pic', 'update', md5( 'g' ) ) );
+ok( 'a menu is not queued', false === $q->upsert( 'menu', '', 804, 'Main', 'update', md5( 'g' ) ) );
+// A DELETE with no author is exactly what was on the reported screen.
+ok( 'and neither is a delete', false === $q->upsert( 'media', '', 805, 'ifs-deploy-0.7.0.zip', 'delete', md5( 'g' ) ) );
+
+ok( 'nothing at all was written', $before === count( $GLOBALS['wpdb']->rows ) );
+
+echo "\n=== 14. but a real user is completely unaffected ===\n";
+//
+// The whole risk of this rule is over-reach, so the ordinary path is pinned right beside it.
+$GLOBALS['dp_user'] = 7;
+
+ok( 'a logged-in user still queues', true === $q->upsert( 'post', 'page', 800, 'Ghost', 'update', md5( 'g' ) ) );
+ok( 'and the row is attributed to them', 7 === (int) $GLOBALS['wpdb']->rows[ array_key_last( $GLOBALS['wpdb']->rows ) ]->user_id );
+
+echo "\n=== 15. and a site that DOES edit by script can opt back in ===\n";
+//
+// The cost of this rule stated honestly: a genuine change made by WP-CLI or an importer is
+// silently not queued. The filter is the way back, and it is only consulted when there is
+// no user — so the ordinary path above pays nothing for it.
+$GLOBALS['dp_user'] = 0;
+add_filter( 'ifs_deploy_track_without_user', function () { return true; } );
+
+ok( 'the filter re-enables tracking', true === $q->upsert( 'post', 'page', 900, 'Scripted', 'update', md5( 's' ) ) );
+
+remove_all_filters( 'ifs_deploy_track_without_user' );
+ok( 'and without it the rule holds again', false === $q->upsert( 'post', 'page', 901, 'Scripted', 'update', md5( 's' ) ) );
+
+$GLOBALS['dp_user'] = 7;
 
 printf( "\n%d passed, %d failed\n", $pass, $fail );
 exit( $fail > 0 ? 1 : 0 );

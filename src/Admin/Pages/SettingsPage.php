@@ -1140,9 +1140,30 @@ final class SettingsPage {
 		);
 	}
 
-	private function notice( string $message ): string {
+	/**
+	 * The result of a save, handed to the SAME toast every other action uses.
+	 *
+	 * ── WHY THIS IS NOT A wp-admin NOTICE ANY MORE ─────────────────────────────────
+	 *
+	 * Saving here posts a real form, so the outcome used to be a `notice notice-success`
+	 * printed into the page — which meant one part of the plugin reported itself in
+	 * WordPress's voice while every other action reported itself in the plugin's. Two
+	 * visual languages for the same kind of statement, and the wp-admin one is the easier
+	 * of the two to scroll past.
+	 *
+	 * It cannot be localised into the script instead: `Assets::enqueue()` runs on
+	 * `admin_enqueue_scripts`, which is long finished by the time this save happens
+	 * during render. So the message is emitted as a marker element and `admin.js` turns
+	 * it into a toast on load — which also works for the AJAX tab loader, where there is
+	 * no page load at all.
+	 *
+	 * @param string $message What happened.
+	 * @param bool   $is_error Failures use the same channel; only the styling differs.
+	 */
+	private function notice( string $message, bool $is_error = false ): string {
 		return sprintf(
-			'<div class="notice notice-success is-dismissible"><p>%s</p></div>',
+			'<div class="ifs-deploy-flash" data-error="%1$d" hidden>%2$s</div>',
+			$is_error ? 1 : 0,
 			esc_html( $message )
 		);
 	}

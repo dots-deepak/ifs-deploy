@@ -22,6 +22,13 @@ Priority is **1–10**, where 10 must happen first.
   deployed *after* the cancel had put them back, so they vanished from the list. Fixed in
   the working tree; not yet in any build.
 
+- **(7) Rollback permissions.** As **User A**, push a change, then roll it back — should
+  work. As **User B** (not an admin, but with the rollback permission), open Deployment
+  History: A's deployment should show a dash instead of a Rollback button, with a tooltip
+  naming A. As an **administrator**, both should be rollback-able. Until now anyone holding
+  the rollback permission could undo *anyone's* deployment, including one they were never
+  allowed to push. Fixed in the working tree; not yet in any build.
+
   Worth doing because it is the only operation that changes Production *without* you
   asking for a change — it reverts. Use throwaway content the first time.
 

@@ -101,6 +101,17 @@ final class Ajax {
 			wp_send_json_error( array( 'message' => __( 'Invalid deployment.', 'ifs-deploy' ) ) );
 		}
 
+		/*
+		 * The PREVIEW is guarded too, not only the rollback itself.
+		 *
+		 * It is read-only, so this is not about preventing damage — it is that the preview
+		 * renders the previous contents of someone else's pages, which is a disclosure in
+		 * its own right on a site where roles are scoped. And a dialog that opens, fills
+		 * with detail and only then refuses at Confirm is a worse experience than one that
+		 * never opens.
+		 */
+		$this->require_own_deployment( $deployment_id );
+
 		$revision_id = isset( $_POST['revision_id'] ) ? absint( wp_unslash( $_POST['revision_id'] ) ) : 0;
 		$summary     = new RollbackSummary();
 
@@ -594,6 +605,8 @@ final class Ajax {
 			wp_send_json_error( array( 'message' => __( 'Invalid deployment.', 'ifs-deploy' ) ) );
 		}
 
+		$this->require_own_deployment( $deployment_id );
+
 		$result = ( new DeploymentService() )->rollback( $deployment_id );
 
 		if ( ! empty( $result['ok'] ) ) {
@@ -667,6 +680,49 @@ final class Ajax {
 		wp_send_json_error(
 			array( 'message' => __( 'This site is set to Production, so it receives deployments rather than sending them. Push from the Staging site.', 'ifs-deploy' ) ),
 			409
+		);
+	}
+
+	/**
+	 * Refuse to touch a deployment somebody else made.
+	 *
+	 * ── THE GAP THIS CLOSES ────────────────────────────────────────────────────────
+	 *
+	 * Pushing has always been the creator's own act: `queue_ids()` narrows submitted rows
+	 * to the ones this user made, and only an administrator may opt into the rest. Rolling
+	 * back had no such rule — the capability alone was enough, so anyone who could roll
+	 * back anything could roll back EVERYTHING, including a colleague's deployment they
+	 * were never allowed to push in the first place.
+	 *
+	 * That is the wrong way round. A rollback restores older content over live pages and is
+	 * among the least reversible things here; if a user may not publish someone's work, they
+	 * certainly may not unpublish it.
+	 *
+	 * Enforced against the DATABASE — `deployed_by` on the deployment row — never from
+	 * anything the page supplied, exactly as the queue rule is.
+	 */
+	private function require_own_deployment( int $deployment_id ): void {
+		$deployment = ( new DeploymentRepository() )->get( $deployment_id );
+
+		if ( null === $deployment ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid deployment.', 'ifs-deploy' ) ) );
+		}
+
+		if ( Access::may_act_on( (int) $deployment->deployed_by ) ) {
+			return;
+		}
+
+		$who = get_userdata( (int) $deployment->deployed_by );
+
+		wp_send_json_error(
+			array(
+				'message' => sprintf(
+					/* translators: %s: the name of the user who made the deployment */
+					__( 'This deployment was pushed by %s, and only they — or an administrator — can roll it back.', 'ifs-deploy' ),
+					$who instanceof \WP_User ? $who->display_name : __( 'another user', 'ifs-deploy' )
+				),
+			),
+			403
 		);
 	}
 

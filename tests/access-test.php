@@ -6,7 +6,9 @@ function add_filter( ...$a ) {}
 function absint( $v ) { return abs( (int) $v ); }
 function get_option( $n, $d = false ) { return $GLOBALS['dp_opt'][ $n ] ?? $d; }
 function update_option( $n, $v, $a = null ) { $GLOBALS['dp_opt'][ $n ] = $v; return true; }
-function get_current_user_id() { return 7; }
+// Variable, so "logged out" and "somebody else" are both reachable. Defaults to 7, which
+// is what every test written before this expected.
+function get_current_user_id() { return $GLOBALS['dp_user'] ?? 7; }
 function current_user_can( $c ) { return ! empty( $GLOBALS['dp_current'][ $c ] ); }
 
 class WP_User {
@@ -107,6 +109,72 @@ $GLOBALS['dp_current'] = array( Access::CAP_VIEW_ALL => true );
 ok( 'sees_all -> scope null', null === Access::scope_user_id() );
 $GLOBALS['dp_current'] = array();
 ok( 'no view_all -> scope own id', 7 === Access::scope_user_id() );
+
+echo "\n=== acting on something SOMEBODY ELSE owns ===\n";
+//
+// ── THE GAP THIS CLOSES ────────────────────────────────────────────────────────────
+//
+// Pushing was always the creator's own act: submitted queue rows are narrowed to the ones
+// this user made, and only an administrator may opt into the rest. Rolling back had no such
+// rule — holding the rollback capability was enough, so any user who could roll back
+// anything could roll back EVERYTHING, including a colleague's deployment they were never
+// allowed to push in the first place.
+//
+// One rule now, so the two cannot drift apart again.
+$GLOBALS['dp_user'] = 7;
+
+$GLOBALS['dp_current'] = array();
+ok( 'my own is mine to act on',            true === Access::may_act_on( 7 ) );
+ok( 'someone else\'s is not',              false === Access::may_act_on( 8 ) );
+
+// The exemption is a REAL administrator. It exists because the alternative strands work:
+// someone leaves, and a bad deployment of theirs could never be undone by anyone.
+$GLOBALS['dp_current'] = array( Access::CAP_MANAGE => true );
+ok( 'an administrator may act on anyone\'s', true === Access::may_act_on( 8 ) );
+
+/*
+ * NOT `view_all`. Seeing and acting are different powers, and conflating them is the exact
+ * mistake this rule was rewritten to remove once already for pushing. An editor may need to
+ * review the whole team's work without being able to undo a colleague's deployment — which
+ * restores older content over live pages.
+ */
+$GLOBALS['dp_current'] = array( Access::CAP_VIEW_ALL => true );
+ok( 'seeing everything does NOT grant acting on it', false === Access::may_act_on( 8 ) );
+
+// A logged-out request owns nothing, and an owner id of 0 must never match it.
+$GLOBALS['dp_current'] = array();
+$GLOBALS['dp_user']    = 0;
+ok( 'logged out owns nothing',             false === Access::may_act_on( 0 ) );
+ok( 'and cannot act on a real user\'s',    false === Access::may_act_on( 7 ) );
+
+$GLOBALS['dp_user'] = 7;
+
+echo "\n=== and the rule is actually applied to rollback ===\n";
+//
+// Read from source: reaching these needs the whole AJAX stack. What matters is that both
+// rollback entry points consult the rule, and that the check is against the DATABASE row
+// rather than anything the page supplied.
+$ajax_src = (string) php_strip_whitespace( __DIR__ . '/../src/Admin/Ajax.php' );
+
+ok( 'there is a single ownership guard', false !== strpos( $ajax_src, 'function require_own_deployment(' ) );
+ok( 'it reads the deployment from the database', (bool) preg_match( '/require_own_deployment\(.*?DeploymentRepository\(\) \)->get\( \$deployment_id \)/s', $ajax_src ) );
+ok( 'and decides with the shared rule', (bool) preg_match( '/require_own_deployment\(.*?Access::may_act_on\( \(int\) \$deployment->deployed_by \)/s', $ajax_src ) );
+
+foreach ( array( 'rollback', 'rollback_preview' ) as $method ) {
+	if ( ! preg_match( '/function ' . preg_quote( $method, '/' ) . '\(\): void \{(.*?)(?=function [a-z_]+\()/s', $ajax_src, $body ) ) {
+		ok( "{$method}() body was located", false );
+		continue;
+	}
+
+	ok( "{$method}() checks ownership", false !== strpos( $body[1], 'require_own_deployment(' ) );
+}
+
+// The preview is guarded too: it renders the previous contents of someone else's pages,
+// which is a disclosure in its own right, and a dialog that fills with detail and only then
+// refuses at Confirm is worse than one that never opens.
+$history_src = (string) php_strip_whitespace( __DIR__ . '/../src/Admin/Pages/HistoryPage.php' );
+
+ok( 'the History screen hides the button too', false !== strpos( $history_src, 'Access::may_act_on( (int) $deployment->deployed_by )' ) );
 
 echo "\n=== per-user OVERRIDES ===\n";
 

@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.12.2
+Stable tag: 0.12.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,25 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.12.3 =
+Rolling back now follows the same permission rule as pushing.
+
+* **A deployment can only be rolled back by the person who pushed it, or an administrator.**
+  Pushing has always been the creator's own act — you can push your own changes, and only an
+  administrator can push everyone's. Rolling back had no such rule: holding the rollback
+  permission was enough to undo *anyone's* deployment, including one the same user would not
+  have been allowed to push in the first place. A rollback restores older content over live
+  pages, so if someone may not publish a colleague's work they should certainly not be able
+  to unpublish it.
+* **Deployment History says why a Rollback button is missing** — it names the person who
+  pushed it, instead of showing an unexplained dash.
+* **The rollback preview is covered by the same rule.** It shows the previous contents of the
+  pages involved, so it is not something to render for a deployment you may not undo — and a
+  dialog that fills with detail and only then refuses is worse than one that never opens.
+* Being able to *see* everyone's changes still does not grant the ability to act on them.
+  Seeing and publishing are separate permissions and stay separate.
+* `SECURITY.md` rewritten as a short, readable summary of what was found and fixed.
 
 = 0.12.2 =
 Cancelling a push no longer loses the changes it was meant to keep.
@@ -425,6 +444,10 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.12.3 =
+Rolling back now requires being the person who pushed it, or an administrator — matching how
+pushing already worked. No database upgrade. Update both sites together.
 
 = 0.12.2 =
 Fixes cancelling a push removing items from Pending Changes. No database upgrade. Update

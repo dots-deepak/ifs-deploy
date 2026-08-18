@@ -365,4 +365,42 @@ final class Access {
 	public static function scope_user_id(): ?int {
 		return self::sees_all() ? null : get_current_user_id();
 	}
+
+	/**
+	 * May the current user ACT on something another user owns?
+	 *
+	 * ── ONE RULE, WHEREVER SOMETHING IS OWNED ──────────────────────────────────────
+	 *
+	 * Yours, or you are an administrator. That is the whole rule, and it is the same
+	 * one `Ajax::queue_ids()` enforces for pushing — written here so pushing and rolling
+	 * back cannot drift apart, which is exactly what had happened: a pending change could
+	 * only be pushed by the person who made it, and then ANY user with the rollback
+	 * capability could undo the deployment that resulted.
+	 *
+	 * ── WHY NOT `CAP_VIEW_ALL` ─────────────────────────────────────────────────────
+	 *
+	 * Because seeing and acting are different powers, and conflating them is the mistake
+	 * this rule was rewritten to remove once already. An editor may legitimately need to
+	 * review the whole team's work without being able to undo a colleague's deployment —
+	 * which restores older content over live pages and is among the least reversible
+	 * things this plugin can do.
+	 *
+	 * The exemption is `manage_options`, a real administrator, and it exists because the
+	 * alternative strands work: someone leaves, and a deployment of theirs that turned out
+	 * wrong could never be undone by anyone.
+	 *
+	 * A logged-out request owns nothing — `get_current_user_id()` returns 0, and an owner
+	 * id of 0 must never match it.
+	 *
+	 * @param int $owner_id The user who owns the thing being acted on.
+	 */
+	public static function may_act_on( int $owner_id ): bool {
+		if ( current_user_can( self::CAP_MANAGE ) ) {
+			return true;
+		}
+
+		$user = get_current_user_id();
+
+		return $user > 0 && $user === $owner_id;
+	}
 }

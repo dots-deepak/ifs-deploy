@@ -96,6 +96,29 @@ final class HistoryPage {
 			return '<span class="description">&mdash;</span>';
 		}
 
+		/*
+		 * SOMEONE ELSE'S DEPLOYMENT — say whose, rather than showing a dead dash.
+		 *
+		 * A user who can see the whole team's history would otherwise get a row with no
+		 * explanation of why it has no button, which reads as the deployment not being
+		 * rollback-able at all. `Ajax::require_own_deployment()` enforces this against the
+		 * database regardless of what this renders; here it only decides what to say.
+		 */
+		if ( ! Access::may_act_on( (int) $deployment->deployed_by ) ) {
+			$who = get_userdata( (int) $deployment->deployed_by );
+
+			return sprintf(
+				'<span class="description" title="%s">&mdash;</span>',
+				esc_attr(
+					sprintf(
+						/* translators: %s: the name of the user who made the deployment */
+						__( 'Only %s or an administrator can roll this back.', 'ifs-deploy' ),
+						$who instanceof \WP_User ? $who->display_name : __( 'the user who pushed it', 'ifs-deploy' )
+					)
+				)
+			);
+		}
+
 		if ( ! $this->can_rollback( $deployment, $log ) ) {
 			return '<span class="description">&mdash;</span>';
 		}

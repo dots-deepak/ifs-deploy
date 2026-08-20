@@ -248,6 +248,42 @@ function wp_get_current_user() {
 		'user_email'   => 'tester@staging.test',
 	);
 }
+
+/*
+ * Post statuses, for the "New content arriving here" setting on Production.
+ *
+ * Read from WordPress rather than hard-coded in the plugin, so a workflow plugin's own
+ * status appears in the dropdown without the plugin knowing about it — which means the
+ * render test has to provide a registry for the select to be built from at all.
+ */
+function get_post_stati( $args = array(), $output = 'names' ) {
+	$all = array(
+		'publish' => 'Published',
+		'draft'   => 'Draft',
+		'pending' => 'Pending Review',
+		'private' => 'Private',
+		'future'  => 'Scheduled',
+		'trash'   => 'Trash',
+		'inherit' => 'Inherit',
+	);
+
+	if ( 'objects' === $output ) {
+		$out = array();
+		foreach ( $all as $name => $label ) {
+			$out[ $name ] = (object) array( 'name' => $name, 'label' => $label );
+		}
+		return $out;
+	}
+
+	return array_keys( $all );
+}
+
+function get_post_status_object( $status ) {
+	$known = get_post_stati( array(), 'objects' );
+
+	return $known[ $status ] ?? null;
+}
+
 function mysql2date( string $format, string $date ): string {
 	return $date;
 }

@@ -3,7 +3,7 @@
  * Plugin Name:       IFS Deploy
  * Plugin URI:        https://www.copperleaf.com/
  * Description:       Deploy WordPress content from Staging to Production safely. Track changes, push selected content, and roll back.
- * Version:           0.12.5
+ * Version:           0.13.0
  * Requires at least: 6.5
  * Requires PHP:      8.0
  * Author:            IFS Copperleaf
@@ -77,7 +77,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'IFS_DEPLOY_VERSION', '0.12.5' );
+define( 'IFS_DEPLOY_VERSION', '0.13.0' );
 define( 'IFS_DEPLOY_DB_VERSION', '10' );
 define( 'IFS_DEPLOY_FILE', __FILE__ );
 define( 'IFS_DEPLOY_DIR', plugin_dir_path( __FILE__ ) );

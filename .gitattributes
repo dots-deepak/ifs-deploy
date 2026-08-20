@@ -1,0 +1,26 @@
+# Line endings, pinned.
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────────
+#
+# This repo has `core.autocrlf = true`, so git stores LF and hands the working tree
+# CRLF on checkout. Several tests read a source file raw and match patterns like
+# `\n\t\t}` against it — those only match LF, so whether the suite passes depended on
+# whether a given file had last been written by an editor (CRLF) or by a tool (LF).
+#
+# That is a coin flip, and it fails for anyone who clones this fresh. Pinning the
+# working tree to LF makes the checkout match what git already stores, so the source a
+# test reads is the source everyone else has.
+*           text=auto eol=lf
+
+# Binary: never translated, never diffed as text.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.zip       binary
+*.exe       binary
+*.docx      binary

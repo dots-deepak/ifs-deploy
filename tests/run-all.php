@@ -43,6 +43,7 @@ $suites = array(
 	'nonce',
 	'postmatch',
 	'protocol',
+	'publishpolicy',
 	'queue-revert',
 	'render',
 	'retention',

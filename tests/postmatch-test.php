@@ -170,6 +170,47 @@ require __DIR__ . '/../src/Import/MediaUrlResolver.php';
 // than an autoloaded class that would want to perform a real download.
 require __DIR__ . '/lib-media-importer.php';
 
+
+/*
+ * Status registry. PublishPolicy reads it to build its dropdown and to check that a
+ * configured status still exists — a workflow plugin can be deactivated after its status
+ * was chosen, and applying one WordPress no longer knows makes content unreachable.
+ */
+function get_post_stati( $args = array(), $output = 'names' ) {
+	$all = array(
+		'publish' => 'Published',
+		'draft'   => 'Draft',
+		'pending' => 'Pending Review',
+		'private' => 'Private',
+		'future'  => 'Scheduled',
+		'trash'   => 'Trash',
+		'inherit' => 'Inherit',
+	);
+
+	if ( 'objects' === $output ) {
+		$out = array();
+		foreach ( $all as $name => $label ) {
+			$out[ $name ] = (object) array( 'name' => $name, 'label' => $label );
+		}
+		return $out;
+	}
+
+	return array_keys( $all );
+}
+
+function get_post_status_object( $status ) {
+	$known = get_post_stati( array(), 'objects' );
+
+	return $known[ $status ] ?? null;
+}
+
+if ( ! function_exists( 'post_type_exists' ) ) {
+	function post_type_exists( $type ) {
+		return in_array( $type, array( 'post', 'page', 'event', 'knowledge_hub', 'product' ), true );
+	}
+}
+
+require __DIR__ . '/../src/Support/PublishPolicy.php';
 require __DIR__ . '/../src/Import/PostImporter.php';
 
 use IfsDeploy\Import\PostImporter;

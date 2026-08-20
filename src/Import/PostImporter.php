@@ -7,6 +7,7 @@ use IfsDeploy\Support\ContentFirewall;
 use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\MediaIdentity;
 use IfsDeploy\Support\MetaBlocklist;
+use IfsDeploy\Support\PublishPolicy;
 use IfsDeploy\Support\SafeData;
 use IfsDeploy\Support\UrlRewriter;
 use WP_Error;
@@ -103,11 +104,43 @@ final class PostImporter {
 			'post_parent'    => $this->map_parent( (int) ( $fields['post_parent'] ?? 0 ), $origin_site, (string) ( $fields['post_type'] ?? 'post' ) ),
 		);
 
+		/*
+		 * WHAT STATUS THIS SITE GIVES THE OBJECT — see Support\PublishPolicy.
+		 *
+		 * Decided HERE rather than by the sender, because it is a decision about this site:
+		 * a team can require that everything arrives as a draft and is published by a
+		 * person on the live site. The default reproduces Staging exactly, which is what
+		 * the plugin has always done.
+		 */
+		$incoming_status = (string) ( $fields['post_status'] ?? 'draft' );
+
 		$created = false;
 		if ( $existing_id ) {
+			/*
+			 * AN UPDATE NEVER RE-DECIDES THE STATUS — it only carries one through when
+			 * Staging actually changed it.
+			 *
+			 * Once new content arrives as a draft and somebody here publishes it, the two
+			 * sites disagree on purpose. Applying the status field on every subsequent edit
+			 * would undo that: fix a typo on Staging, and a page deliberately unpublished
+			 * here goes live again. `respects_source_status()` answers the only question
+			 * that matters — did anyone change it THERE — by comparing against what Staging
+			 * said last time, not against what this site currently shows.
+			 */
+			if ( ! PublishPolicy::respects_source_status( $existing_id, $incoming_status ) ) {
+				unset( $postarr['post_status'] );
+			}
+
 			$postarr['ID'] = $existing_id;
 			$result        = wp_update_post( wp_slash( $postarr ), true );
 		} else {
+			// First arrival: the policy decides, falling back to Draft when the configured
+			// status cannot be used for this post type.
+			$postarr['post_status'] = PublishPolicy::status_for_new(
+				$incoming_status,
+				(string) ( $fields['post_type'] ?? 'post' )
+			);
+
 			// Preserve the source ID on Production so cross-references (menus, ACF
 			// relations, inline media) line up on both sites. import_id is honored
 			// only when that ID is free; WordPress assigns a new one on collision.
@@ -127,6 +160,16 @@ final class PostImporter {
 		// Stamp identity for future deploys.
 		update_post_meta( $post_id, self::ORIGIN_ID_META, $origin_id );
 		update_post_meta( $post_id, self::ORIGIN_SITE_META, $origin_site );
+
+		/*
+		 * And what Staging said the status was THIS TIME.
+		 *
+		 * Written on every import, whatever was actually applied, because the next push
+		 * compares against it to decide whether anyone changed the status on Staging. It
+		 * records the SOURCE's value, not this site's — those are allowed to differ, and
+		 * the difference is the whole point.
+		 */
+		update_post_meta( $post_id, PublishPolicy::LAST_SOURCE_STATUS_META, $incoming_status );
 
 		// Stamp the Staging-computed signature of what we just deployed, so the
 		// Compare screen can tell "in sync" from "drifted" reliably.

@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.12.5
+Stable tag: 0.13.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,30 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.13.0 =
+New content can now arrive unpublished, so somebody on the live site decides when it goes
+public.
+
+* **New setting: the status new content arrives with.** On the Production site, Settings now
+  offers "Status for new items" — Draft, Pending Review, Private, or any other status
+  registered on that site. Choose one and a page pushed for the first time waits there
+  instead of going live the moment it lands. The default is unchanged: content arrives
+  exactly as it is on Staging.
+* **It applies to new content only.** A page that already exists on Production keeps the
+  status it has. Pushing an edit to it does not republish it, and does not unpublish it
+  either — so a page you deliberately published on the live site stays published, however
+  many content edits follow.
+* **Unless the status was deliberately changed on Staging.** That is a change like any other
+  and is applied normally. The two cases are told apart by what Staging said last time, not
+  by comparing the two sites — once the setting is in use they are meant to differ.
+* **The setting lives on Production, where it belongs.** The live site decides its own
+  publishing; a policy set on Staging would mean the sending site choosing when Production
+  publishes. Staging shows a note saying where to find it.
+* **Falls back to Draft** if the chosen status cannot be used for a particular post type,
+  rather than falling back to publishing it.
+* Line endings are now pinned to LF across the repository, which fixes a set of checks that
+  passed or failed depending on how a file had last been saved.
 
 = 0.12.5 =
 Cancelling a push is now reliable, including when Production is slow.
@@ -489,6 +513,11 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.13.0 =
+Adds a Production-side setting for the status new content arrives with, so it can wait for
+review instead of publishing itself. Existing content is unaffected. No database upgrade.
+Update both sites together.
 
 = 0.12.5 =
 Fixes a cancelled push still going live when Production is slow, and keeps cancelled items in

@@ -16,6 +16,7 @@ use IfsDeploy\Support\ContentFirewall;
 use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\IpAccess;
 use IfsDeploy\Support\LogRetention;
+use IfsDeploy\Support\PublishPolicy;
 
 /**
  * Settings, split into two sections: Connection and Role Management.
@@ -201,6 +202,7 @@ final class SettingsPage {
 		echo '<p class="dp-help">' . esc_html__( 'A deliberately replayed request is a different result — "Replay refused" — and is always listed, whatever this is set to.', 'ifs-deploy' ) . '</p>';
 		echo '</div></div>';
 
+		$this->publish_policy();
 		$this->content_firewall();
 		$this->ip_rules();
 
@@ -304,6 +306,66 @@ final class SettingsPage {
 	 * Only meaningful on the receiving side, and the copy says so rather than offering a
 	 * setting that quietly does nothing.
 	 */
+	/**
+	 * What status content gets the FIRST time it arrives here.
+	 *
+	 * Production-only, and for the same reason the content firewall is: it is a decision
+	 * about what happens to THIS site. A policy set on Staging would mean the sending site
+	 * choosing when the live site publishes, which is the authority this exists to remove.
+	 */
+	private function publish_policy(): void {
+		Section::heading( __( 'New content arriving here', 'ifs-deploy' ) );
+
+		if ( ! Config::is_production() ) {
+			echo '<p class="dp-help">' . esc_html__( 'This site is the Staging source, so nothing arrives into it. Set this on the Production site — it decides its own publishing.', 'ifs-deploy' ) . '</p>';
+			return;
+		}
+
+		echo '<p class="dp-help">' . esc_html__( 'By default a deploy reproduces Staging exactly, so a page that is published there is live here the moment it arrives. Choose a status below if new content should wait for someone on this site to publish it instead.', 'ifs-deploy' ) . '</p>';
+
+		$current = PublishPolicy::get();
+		$options = '';
+
+		foreach ( PublishPolicy::choices() as $value => $label ) {
+			$options .= sprintf(
+				'<option value="%1$s"%2$s>%3$s</option>',
+				esc_attr( (string) $value ),
+				selected( $current, $value, false ),
+				esc_html( $label )
+			);
+		}
+
+		$this->field(
+			'new_status',
+			__( 'Status for new items', 'ifs-deploy' ),
+			sprintf(
+				'<select id="new_status" name="new_status">%s</select>',
+				$options // phpcs:ignore WordPress.Security.EscapeOutput -- built from escaped parts above.
+			),
+			__( 'Applies to pages, posts and custom post types.', 'ifs-deploy' )
+		);
+
+		/*
+		 * The two halves people get wrong, stated as plainly as possible. "Only new items"
+		 * sounds obvious and is the single most misread part of a setting like this.
+		 */
+		echo '<div class="dp-note">';
+		echo '<p class="dp-help"><strong>' . esc_html__( 'This affects new content only', 'ifs-deploy' ) . '</strong></p>';
+		echo '<ul class="dp-list">';
+		printf( '<li>%s</li>', esc_html__( 'A page arriving here for the first time gets the status above, whatever Staging says.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'A page that already exists here keeps the status it has. Pushing an edit to it does not republish it, and does not unpublish it either.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'If somebody deliberately changes a page’s status on Staging and pushes it, that change IS applied — a status change is a change like any other.', 'ifs-deploy' ) );
+		printf( '<li>%s</li>', esc_html__( 'Media, categories, tags and menus are unaffected; they have no editorial status to hold back.', 'ifs-deploy' ) );
+		echo '</ul></div>';
+
+		if ( PublishPolicy::is_active() ) {
+			printf(
+				'<div class="notice notice-info"><p>%s</p></div>',
+				esc_html__( 'New content will not go live on its own. Somebody here has to publish it — check this site’s own Posts and Pages screens after a deploy.', 'ifs-deploy' )
+			);
+		}
+	}
+
 	private function content_firewall(): void {
 		Section::heading( __( 'Imported content', 'ifs-deploy' ) );
 
@@ -1134,6 +1196,12 @@ final class SettingsPage {
 
 			if ( isset( $_POST['content_firewall'] ) ) {
 				ContentFirewall::set_mode( sanitize_key( wp_unslash( (string) $_POST['content_firewall'] ) ) );
+			}
+
+			if ( isset( $_POST['new_status'] ) ) {
+				// Validated inside set(): a status that is not registered on this site falls
+				// back to "same as Staging" rather than being stored and later applied.
+				PublishPolicy::set( sanitize_key( wp_unslash( (string) $_POST['new_status'] ) ) );
 			}
 
 			// Address rules. `save()` validates each entry and reports back anything it

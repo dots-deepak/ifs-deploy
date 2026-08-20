@@ -52,6 +52,7 @@ final class DataReset {
 		'_ifs_deploy_origin_site',
 		'_ifs_deploy_source_url',
 		'_ifs_deploy_src_sig',
+		'_ifs_deploy_src_status',
 	);
 
 	/** Term meta, same reasoning. */
@@ -62,6 +63,12 @@ final class DataReset {
 
 	/**
 	 * Options that are pure bookkeeping — safe to drop without unpairing the sites.
+	 *
+	 * `ifs_deploy_new_status` is deliberately NOT here. It is an editorial policy — "new
+	 * content arrives as a draft" — rather than a record of what this plugin has done.
+	 * Resetting the data so a test can start from nothing must not silently re-arm
+	 * automatic publishing on a live site, which is what clearing it would do. Same
+	 * reasoning as the connection settings below.
 	 */
 	private const STATE_OPTIONS = array(
 		'ifs_deploy_debug_log',

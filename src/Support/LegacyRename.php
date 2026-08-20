@@ -94,6 +94,7 @@ final class LegacyRename {
 		'ip_allow',
 		'ip_block',
 		'content_firewall',
+		'new_status',
 		'peer_protocol',
 		'log_duplicates',
 	);

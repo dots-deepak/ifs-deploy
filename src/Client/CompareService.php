@@ -6,7 +6,6 @@ namespace IfsDeploy\Client;
 use IfsDeploy\Auth\Credentials;
 use IfsDeploy\Support\SiteIndex;
 use IfsDeploy\Support\SyncCheck;
-use WP_Error;
 
 /**
  * Staging-side comparison + sync against Production.

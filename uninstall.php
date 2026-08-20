@@ -40,6 +40,7 @@ $options = array(
 	'ifs_deploy_ip_allow',
 	'ifs_deploy_ip_block',
 	'ifs_deploy_content_firewall',
+	'ifs_deploy_new_status',
 	'ifs_deploy_peer_protocol',
 	'ifs_deploy_log_duplicates',
 	// Written by Support\LegacyRename once the pre-rename migration has been considered.

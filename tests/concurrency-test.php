@@ -272,8 +272,17 @@ $js = (string) file_get_contents( $root . '/assets/js/admin.js' );
  * than the plan promised.
  */
 ok( 'both push buttons pass the flag to the planner', 2 === substr_count( $js, 'pushStart( set.ids, includeOthers() )' ) );
-ok( 'the plan request carries it', (bool) preg_match( "/action: 'ifs_deploy_push_plan'.*?include_others: includeOthers/s", $js ) );
-ok( 'and so does every batch', (bool) preg_match( "/action: 'ifs_deploy_push_batch'.*?include_others: push\.includeOthers/s", $js ) );
+/*
+ * The request bodies are BUILT rather than written as literals now, because Compare & Sync
+ * pushes posts through the same dialog and the two sources use different endpoints and a
+ * different id field. What must not change is that the flag rides along on both.
+ */
+ok( 'the plan request carries it', (bool) preg_match( '/planData = \{.*?include_others: includeOthers/s', $js ) );
+ok( 'and so does every batch', (bool) preg_match( '/batchData = \{.*?include_others: push\.includeOthers/s', $js ) );
+
+// And the queue source still points at the endpoints that enforce ownership.
+ok( 'the queue source uses the guarded endpoints', (bool) preg_match( "/queue: \{\s*plan: 'ifs_deploy_push_plan',\s*batch: 'ifs_deploy_push_batch'/s", $js ) );
+ok( 'and sends its ids as queue ids', (bool) preg_match( "/queue: \{.*?idField: 'queue_ids'/s", $js ) );
 ok( 'and the cancel', (bool) preg_match( "/action: 'ifs_deploy_push_cancel'.*?include_others: push\.includeOthers/s", $js ) );
 ok( 'and on ignore', false !== strpos( $js, "ifs_deploy_ignore', { queue_ids: set.ids, include_others: includeOthers()" ) );
 // One helper, so the three actions cannot drift apart on what the flag means.

@@ -75,7 +75,8 @@ final class ComparePage {
 			__( 'These pages/posts differ from Production. Push to make Production match Staging.', 'ifs-deploy' ),
 			$different,
 			true,
-			__( 'Nothing is out of sync. 🎉', 'ifs-deploy' )
+			__( 'Nothing is out of sync. 🎉', 'ifs-deploy' ),
+			'different'
 		);
 
 		if ( $missing ) {
@@ -84,7 +85,8 @@ final class ComparePage {
 				__( 'These exist on Staging but not yet on Production.', 'ifs-deploy' ),
 				$missing,
 				true,
-				''
+				'',
+				'missing'
 			);
 		}
 
@@ -131,7 +133,7 @@ final class ComparePage {
 	 * @param bool   $with_action   Whether to render the push action column.
 	 * @param string $empty_message Message when the group is empty ('' = skip).
 	 */
-	private function objects_table( string $heading, string $description, array $rows, bool $with_action, string $empty_message ): void {
+	private function objects_table( string $heading, string $description, array $rows, bool $with_action, string $empty_message, string $group = '' ): void {
 		Section::heading(
 			$heading,
 			'<span class="ifs-deploy-count">' . (int) count( $rows ) . '</span>'
@@ -148,8 +150,34 @@ final class ComparePage {
 			return;
 		}
 
-		echo '<table class="wp-list-table widefat fixed striped">';
+		/*
+		 * THE BULK BAR, and the wording is doing real work.
+		 *
+		 * These rows are not a list of anyone's edits — they are every object whose content
+		 * differs from Production's, which includes things nobody touched on Staging (a page
+		 * edited directly on Production, say). Pushing several at once therefore overwrites
+		 * Production for all of them, and the button has to say that rather than implying it
+		 * is publishing work someone did here.
+		 */
+		if ( $with_action ) {
+			printf(
+				'<div class="dp-actions ifs-deploy-compare-actions" data-group="%1$s">'
+					. '<button type="button" class="button button-primary ifs-deploy-compare-push" data-group="%1$s">%2$s</button>'
+					. '<span class="dp-help ifs-deploy-compare-count" data-group="%1$s"></span>'
+					. '</div>',
+				esc_attr( $group ),
+				esc_html__( 'Push Selected to Production', 'ifs-deploy' )
+			);
+		}
+
+		echo '<table class="wp-list-table widefat fixed striped ifs-deploy-compare">';
 		echo '<thead><tr>';
+		if ( $with_action ) {
+			printf(
+				'<td class="check-column"><input type="checkbox" class="ifs-deploy-compare-all" data-group="%s" /></td>',
+				esc_attr( $group )
+			);
+		}
 		echo '<th>' . esc_html__( 'Object', 'ifs-deploy' ) . '</th>';
 		echo '<th>' . esc_html__( 'Type', 'ifs-deploy' ) . '</th>';
 		echo '<th>' . esc_html__( 'Match', 'ifs-deploy' ) . '</th>';
@@ -161,7 +189,15 @@ final class ComparePage {
 		echo '</tr></thead><tbody>';
 
 		foreach ( $rows as $row ) {
-			$cells = sprintf(
+			$check = $with_action
+				? sprintf(
+					'<th scope="row" class="check-column"><input type="checkbox" class="ifs-deploy-compare-item" data-group="%1$s" value="%2$d" /></th>',
+					esc_attr( $group ),
+					(int) $row['id']
+				)
+				: '';
+
+			$cells = $check . sprintf(
 				'<td><strong>%1$s</strong><span class="dp-id">#%2$d</span></td><td>%3$s</td><td>%4$s</td><td>%5$s</td><td>%6$s</td>',
 				esc_html( $row['title'] ?: __( '(no title)', 'ifs-deploy' ) ),
 				(int) $row['id'],

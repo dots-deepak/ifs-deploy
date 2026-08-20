@@ -4,7 +4,7 @@ Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.12.3
+Stable tag: 0.12.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -109,6 +109,51 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.12.5 =
+Cancelling a push is now reliable, including when Production is slow.
+
+* **A push that timed out could go live after being cancelled.** When Production takes
+  longer than the sending site waits — a batch of media routinely does — the request fails
+  on this side while Production carries on and applies everything in it. That case did two
+  harmful things: it never told Production to undo what it had applied, and it recorded the
+  push as *failed*, writing over the fact that it had been *cancelled*. So the push was
+  cancelled, published anyway, and no longer said it had been stopped. This is the reason a
+  cancelled push could still leave a change on the live site.
+* **A cancelled push can no longer be re-recorded as anything else.** Once stopped, it stays
+  stopped, so nothing later mistakes it for a push still in progress.
+* **Cancelling now confirms the live site is clean instead of assuming it.** "Nothing left to
+  undo" can also mean "the batch has not arrived yet", so the check is repeated until two
+  passes in a row come back clean. If that cannot be confirmed, it says so rather than
+  reporting success.
+* **Cancelled items stay in Pending Changes.** After a cancel the list re-checks itself
+  against Production, and a revert still in progress could make an item look already
+  published — removing the very change the cancel had just rescued. Cancelled items are now
+  left on the list so they can be pushed again.
+* **The dialog says what it is doing while it cancels.** It kept showing the push progress
+  bar, which read as the push carrying on. It now says it is undoing, and asks you to keep
+  the tab open while it finishes.
+
+= 0.12.4 =
+Push several items straight from Compare & Sync, and a cancel that is now guaranteed to
+leave nothing behind.
+
+* **Compare & Sync can push several items at once.** Each list has tick boxes and a
+  select-all, so a set of pages can be sent together instead of one row at a time — with the
+  same progress window, item-by-item, and the same Cancel.
+* **The confirmation says what will actually happen.** These lists are everything that
+  *differs* between the two sites, which can include a page edited directly on Production —
+  so the dialog now warns that those edits will be replaced. Creating pages that do not exist
+  on Production yet is worded differently, because nothing is overwritten.
+* **Cancelling a push now guarantees nothing is left applied.** The cancellation was recorded
+  only after the round trip to Production had finished, and that request takes seconds — so a
+  batch completing inside that window read the push as still running and went live anyway.
+  Pressing Cancel could leave part of a push published. The cancellation is now written down
+  before anything else happens, which closes the window entirely.
+* **And it now confirms Production is clean rather than assuming it.** A batch that lands
+  while the undo is in progress creates new changes behind it, so the undo is repeated until
+  Production reports there was nothing left to reverse. If that cannot be confirmed, the
+  result says so instead of reporting success.
 
 = 0.12.3 =
 Rolling back now follows the same permission rule as pushing.
@@ -444,6 +489,14 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.12.5 =
+Fixes a cancelled push still going live when Production is slow, and keeps cancelled items in
+Pending Changes. No database upgrade. Update both sites together.
+
+= 0.12.4 =
+Adds multi-select pushing on Compare & Sync, and fixes a case where cancelling a push could
+still leave part of it published. No database upgrade. Update both sites together.
 
 = 0.12.3 =
 Rolling back now requires being the person who pushed it, or an administrator — matching how

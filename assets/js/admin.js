@@ -450,13 +450,22 @@
 		var $d = pushDialog();
 		var percent = push.total ? Math.round( ( push.done / push.total ) * 100 ) : 0;
 
-		$d.find( '.ifs-deploy-progress-title' ).text( IfsDeploy.i18n.pushTitle );
+		/*
+		 * The heading and the counter both describe PUSHING, so neither is true once the
+		 * user has pressed Cancel. Leaving "2 of 3 items — 66% complete" on screen while
+		 * the undo runs reads as the push carrying on regardless.
+		 */
+		$d.find( '.ifs-deploy-progress-title' ).text(
+			push.cancelling ? IfsDeploy.i18n.pushCancelTitle : IfsDeploy.i18n.pushTitle
+		);
 		$d.find( '.ifs-deploy-progress-bar' ).css( 'width', percent + '%' );
 		$d.find( '.ifs-deploy-progress-count' ).text(
-			IfsDeploy.i18n.pushProgress
-				.replace( '%1$d', push.done )
-				.replace( '%2$d', push.total )
-				.replace( '%3$d', percent )
+			push.cancelling
+				? IfsDeploy.i18n.pushCancelWait
+				: IfsDeploy.i18n.pushProgress
+					.replace( '%1$d', push.done )
+					.replace( '%2$d', push.total )
+					.replace( '%3$d', percent )
 		);
 
 		// While cancelling, the phase and item lines describe work that is no longer
@@ -532,15 +541,18 @@
 
 		pushRender();
 
-		$.post( IfsDeploy.ajaxUrl, {
-			action: 'ifs_deploy_push_batch',
+		var batchData = {
+			action: push.source.batch,
 			nonce: IfsDeploy.nonce,
 			uuid: push.uuid,
-			queue_ids: $.map( batch, function ( item ) {
-				return item.id;
-			} ),
 			include_others: push.includeOthers
-		} )
+		};
+
+		batchData[ push.source.idField ] = $.map( batch, function ( item ) {
+			return item.id;
+		} );
+
+		$.post( IfsDeploy.ajaxUrl, batchData )
 			.done( function ( res ) {
 				if ( ! push || push.cancelling ) {
 					return;
@@ -596,13 +608,44 @@
 			} );
 	}
 
-	function pushStart( ids, includeOthers ) {
-		$.post( IfsDeploy.ajaxUrl, {
-			action: 'ifs_deploy_push_plan',
+	/**
+	 * The two things a push can be made of.
+	 *
+	 * Pending Changes pushes QUEUE ROWS; Compare & Sync pushes POSTS, most of which have no
+	 * queue row at all — it lists objects whose content differs from Production's, which
+	 * includes things nobody edited on Staging.
+	 *
+	 * `idField` matters beyond naming the parameter. A cancel restores queue rows BY ROW ID,
+	 * so sending post ids to it would reset whichever unrelated rows happened to carry those
+	 * numbers. Compare therefore has nothing to restore, and says so with an empty list
+	 * rather than by passing ids that would be read as something else.
+	 */
+	var PUSH_SOURCES = {
+		queue: {
+			plan: 'ifs_deploy_push_plan',
+			batch: 'ifs_deploy_push_batch',
+			idField: 'queue_ids',
+			restores: true
+		},
+		compare: {
+			plan: 'ifs_deploy_compare_plan',
+			batch: 'ifs_deploy_compare_batch',
+			idField: 'post_ids',
+			restores: false
+		}
+	};
+
+	function pushStart( ids, includeOthers, sourceName ) {
+		var source = PUSH_SOURCES[ sourceName || 'queue' ];
+		var planData = {
+			action: source.plan,
 			nonce: IfsDeploy.nonce,
-			queue_ids: ids,
 			include_others: includeOthers
-		} )
+		};
+
+		planData[ source.idField ] = ids;
+
+		$.post( IfsDeploy.ajaxUrl, planData )
 			.done( function ( res ) {
 				if ( ! res || ! res.success ) {
 					notify( ( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError, true );
@@ -612,6 +655,7 @@
 				push = {
 					uuid: res.data.uuid,
 					batches: res.data.batches,
+					source: source,
 					// Every id, so a cancel can put them all back — including the ones
 					// already marked deployed by batches that completed.
 					all: ids,
@@ -641,19 +685,32 @@
 			return;
 		}
 
-		// Marked before the request so no further batch is sent while the undo runs.
+		/*
+		 * THE DIALOG STAYS UP AND SAYS WHAT IT IS DOING.
+		 *
+		 * Cancelling is not instant: Production has to be told to put back whatever it had
+		 * already applied, and then asked again to confirm nothing arrived behind that. It
+		 * can take several seconds. Leaving the old progress bar sitting there made it look
+		 * as though the push was still running — or worse, frozen.
+		 */
 		push.cancelling = true;
+		push.phase = '';
+		push.item = '';
 		push.note = IfsDeploy.i18n.pushCancelling;
+		pushWorking( true );
 		pushRender();
 
 		$.post( IfsDeploy.ajaxUrl, {
 			action: 'ifs_deploy_push_cancel',
 			nonce: IfsDeploy.nonce,
 			uuid: push.uuid,
-			queue_ids: push.all,
+			// Post ids must never reach restore_pending(): it resets queue rows BY ROW ID,
+			// so they would flip whichever unrelated rows carry those numbers.
+			queue_ids: push.source.restores ? push.all : [],
 			include_others: push.includeOthers
 		} )
 			.done( function ( res ) {
+				pushWorking( false );
 				pushClose();
 				reloadWith(
 					( res && res.data && res.data.message ) || IfsDeploy.i18n.genericError,
@@ -661,6 +718,7 @@
 				);
 			} )
 			.fail( function () {
+				pushWorking( false );
 				pushClose();
 				notify( IfsDeploy.i18n.genericError, true );
 			} );
@@ -1243,6 +1301,87 @@
 		} );
 
 		// Compare — push a single object by post id.
+		/* ========================================================================
+		 * Compare & Sync — select several rows and push them together
+		 * ---------------------------------------------------------------------------
+		 * Each group (Different, Not on Production) has its own checkboxes, its own
+		 * select-all and its own button, because they are different actions: one
+		 * overwrites content on Production, the other creates content that is not
+		 * there. Mixing them into a single selection would make the confirmation
+		 * impossible to word honestly.
+		 * ======================================================================== */
+
+		function compareSelected( group ) {
+			return $( '.ifs-deploy-compare-item[data-group="' + group + '"]:checked' )
+				.map( function () {
+					return parseInt( $( this ).val(), 10 );
+				} )
+				.get();
+		}
+
+		/** Keep the count and the button's enabled state in step with the boxes. */
+		function compareSync( group ) {
+			var picked = compareSelected( group ).length;
+			var total = $( '.ifs-deploy-compare-item[data-group="' + group + '"]' ).length;
+
+			$( '.ifs-deploy-compare-count[data-group="' + group + '"]' ).text(
+				picked ? IfsDeploy.i18n.compareSelected.replace( '%1$d', picked ).replace( '%2$d', total ) : ''
+			);
+
+			$( '.ifs-deploy-compare-push[data-group="' + group + '"]' ).prop( 'disabled', 0 === picked );
+
+			// The header box reflects the rows rather than driving them once they diverge.
+			$( '.ifs-deploy-compare-all[data-group="' + group + '"]' ).prop( 'checked', picked > 0 && picked === total );
+		}
+
+		$( document ).on( 'change', '.ifs-deploy-compare-all', function () {
+			var group = $( this ).data( 'group' );
+
+			$( '.ifs-deploy-compare-item[data-group="' + group + '"]' ).prop( 'checked', $( this ).prop( 'checked' ) );
+			compareSync( group );
+		} );
+
+		$( document ).on( 'change', '.ifs-deploy-compare-item', function () {
+			compareSync( $( this ).data( 'group' ) );
+		} );
+
+		// Panels are swapped in by the tab loader, so the initial state has to be set
+		// whenever one arrives rather than only on first load.
+		$( document ).on( 'ifs-deploy:panel', function () {
+			$( '.ifs-deploy-compare-push' ).each( function () {
+				compareSync( $( this ).data( 'group' ) );
+			} );
+		} );
+
+		$( document ).on( 'click', '.ifs-deploy-compare-push', function () {
+			var group = $( this ).data( 'group' );
+			var ids = compareSelected( group );
+
+			if ( ! ids.length ) {
+				notify( IfsDeploy.i18n.noneSelected, true );
+				return;
+			}
+
+			/*
+			 * A DIFFERENT WARNING FROM THE PENDING CHANGES ONE.
+			 *
+			 * Pending Changes pushes edits somebody made here. These rows are simply
+			 * whatever differs from Production — including a page edited directly on
+			 * Production, which this would overwrite with Staging's copy. The confirm has
+			 * to say that, because one click here can now do what took ten before.
+			 */
+			openConfirm( {
+				title: IfsDeploy.i18n.confirmPushTitle,
+				text: ( 'missing' === group
+					? IfsDeploy.i18n.compareConfirmCreate
+					: IfsDeploy.i18n.compareConfirmOverwrite ).replace( '%d', ids.length ),
+				confirmLabel: IfsDeploy.i18n.confirmPushButton,
+				onConfirm: function () {
+					pushStart( ids, false, 'compare' );
+				}
+			} );
+		} );
+
 		$( document ).on( 'click', '.ifs-deploy-push-one', function () {
 			var $btn = $( this );
 			var id = $btn.data( 'id' );

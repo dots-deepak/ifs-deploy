@@ -31,6 +31,8 @@ final class Ajax {
 		add_action( 'wp_ajax_ifs_deploy_push_batch', array( $this, 'push_batch' ) );
 		add_action( 'wp_ajax_ifs_deploy_push_cancel', array( $this, 'push_cancel' ) );
 		add_action( 'wp_ajax_ifs_deploy_deploy_posts', array( $this, 'deploy_posts' ) );
+		add_action( 'wp_ajax_ifs_deploy_compare_plan', array( $this, 'compare_plan' ) );
+		add_action( 'wp_ajax_ifs_deploy_compare_batch', array( $this, 'compare_batch' ) );
 		add_action( 'wp_ajax_ifs_deploy_ignore', array( $this, 'ignore' ) );
 		add_action( 'wp_ajax_ifs_deploy_rollback', array( $this, 'rollback' ) );
 		add_action( 'wp_ajax_ifs_deploy_test_connection', array( $this, 'test_connection' ) );
@@ -472,6 +474,75 @@ final class Ajax {
 		}
 
 		wp_send_json_error( array( 'message' => $result['message'] ) );
+	}
+
+	/**
+	 * Plan a batched push from Compare & Sync.
+	 *
+	 * ── WHY COMPARE NEEDS ITS OWN PAIR ─────────────────────────────────────────────
+	 *
+	 * The Pending Changes planner starts from QUEUE ids. Compare rows are posts, and most of
+	 * them have no queue row at all — the screen lists objects whose content differs from
+	 * Production's, which includes things nobody edited on Staging. So the ids are post ids
+	 * and the planner has to read them as such.
+	 *
+	 * Administrator-only, like the screen itself. There is no ownership narrowing here
+	 * because Compare is not a list of anyone's pending work: it is the state of the two
+	 * sites, and only an administrator can see it in the first place.
+	 */
+	public function compare_plan(): void {
+		$this->guard();
+		$this->require_staging();
+
+		$ids = $this->post_ids();
+
+		if ( empty( $ids ) ) {
+			wp_send_json_error( array( 'message' => __( 'No objects selected.', 'ifs-deploy' ) ) );
+		}
+
+		wp_send_json_success( ( new DeploymentService() )->plan_posts( $ids ) );
+	}
+
+	/**
+	 * Send one batch of a planned Compare & Sync push.
+	 */
+	public function compare_batch(): void {
+		$this->guard();
+		$this->require_staging();
+
+		$uuid = isset( $_POST['uuid'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['uuid'] ) ) : '';
+
+		if ( '' === $uuid ) {
+			wp_send_json_error( array( 'message' => __( 'This push has lost track of itself. Refresh the page and try again.', 'ifs-deploy' ) ) );
+		}
+
+		$result = ( new DeploymentService() )->deploy_post_batch( $uuid, $this->post_ids(), get_current_user_id() );
+
+		if ( ! empty( $result['ok'] ) ) {
+			wp_send_json_success( $result );
+		}
+
+		wp_send_json_error(
+			array(
+				'message'   => $result['message'],
+				'conflicts' => (array) ( $result['conflicts'] ?? array() ),
+			)
+		);
+	}
+
+	/**
+	 * Post ids from the request.
+	 *
+	 * No ownership narrowing, unlike `queue_ids()`: these are not queue rows, and the only
+	 * screen that sends them is administrator-only.
+	 *
+	 * @return int[]
+	 */
+	private function post_ids(): array {
+		$raw = isset( $_POST['post_ids'] ) ? wp_unslash( $_POST['post_ids'] ) : array();
+		$raw = is_array( $raw ) ? $raw : array( $raw );
+
+		return array_values( array_filter( array_map( 'absint', $raw ) ) );
 	}
 
 	public function deploy_posts(): void {

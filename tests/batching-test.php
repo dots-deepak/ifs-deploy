@@ -122,20 +122,26 @@ echo "\n=== a batched push RECORDS ITSELF in Deployment History ===\n";
 // It took rollback with it: the History screen offers Rollback from a deployment row, and
 // there was no row. A batched push could not be rolled back from this side at all.
 /*
- * SCOPED TO deploy_batch()'s OWN BODY.
+ * SCOPED TO send_batch()'s OWN BODY.
  *
- * `send()` further down the same file creates and updates a deployment record too, so an
- * unanchored search across the file passed whatever `deploy_batch()` did — which is exactly
- * how the missing record survived review in the first place. Every assertion below reads
- * only the slice between this method and the next one.
+ * `send_batch()` is the shared tail of a push: lock, open the deployment record, transmit,
+ * apply the results. Both entry points call it — `deploy_batch()` from queue rows and
+ * `deploy_post_batch()` from Compare & Sync's post ids — so the deployment record, the
+ * locking and both halves of the cancellation race are written once rather than twice.
+ *
+ * Bounded by the NEXT function declaration. `src()` runs php_strip_whitespace(), which
+ * collapses the formatting — so the boundary has to be a token, not indentation.
  */
-// Bounded by the NEXT function declaration. `src()` runs php_strip_whitespace(), which
-// collapses the formatting — so the boundary has to be a token, not indentation.
-preg_match( '/function deploy_batch\(.*?(?=function [a-z_]+\()/s', $service, $slice );
+preg_match( '/function send_batch\(.*?(?=function [a-z_]+\()/s', $service, $slice );
 
 $batch_body = (string) ( $slice[0] ?? '' );
 
-ok( 'the deploy_batch body was isolated', '' !== $batch_body && false === strpos( $batch_body, 'function send(' ) );
+ok( 'the send_batch body was isolated', '' !== $batch_body && false === strpos( $batch_body, 'function send(' ) );
+
+// Both sources must go through it, or one of them would quietly lack the record and the
+// cancellation checks.
+ok( 'the queue path goes through it', (bool) preg_match( '/function deploy_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, \$failed \)/s', $service ) );
+ok( 'and so does the Compare path', (bool) preg_match( '/function deploy_post_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, 0 \)/s', $service ) );
 
 ok( 'the batch opens a deployment record', false !== strpos( $batch_body, 'deployments->create(' ) );
 ok( 'and updates it with the results', false !== strpos( $batch_body, 'deployments->update(' ) );
@@ -219,26 +225,120 @@ ok( 'and results are NOT applied when it was cancelled mid-flight', (bool) preg_
 
 // Two things are needed, not one: the rows go back, AND Production is told to undo this
 // batch too — it applied after the cancel had already swept the deployment.
-ok( 'the late batch is reverted on Production as well', (bool) preg_match( "/is_cancelled\(.*?post\(\s*'cancel'/s", $batch_body ) );
+ok( 'the late batch is handed to the shared revert', false !== strpos( $batch_body, 'revert_after_cancel(' ) );
+ok( 'which re-cancels on Production', (bool) preg_match( "/function revert_after_cancel\(.*?post\(\s*'cancel'/s", $service ) );
+ok( 'and puts the rows back', (bool) preg_match( '/function revert_after_cancel\(.*?restore_pending\(/s', $service ) );
+
+/*
+ * ── A TIMEOUT IS NOT A FAILURE TO DEPLOY ──────────────────────────────────────────
+ *
+ * When Production takes longer than this side waits — a batch of media downloads
+ * routinely does — the request returns an error while Production carries on and applies
+ * every object in it. The transport-error branch used to return without re-cancelling,
+ * AND wrote STATUS_FAILED over STATUS_CANCELLED, erasing the flag that tells a later batch
+ * not to apply itself. So the push was cancelled, Production published it anyway, and the
+ * record no longer said it had been cancelled.
+ *
+ * The cancellation check therefore has to come BEFORE the error branch, not after it.
+ */
+$at_cancel_check = strpos( $batch_body, 'is_cancelled( $this->deployments->get_by_uuid( $uuid ) )' );
+$at_error_branch = strpos( $batch_body, 'is_wp_error( $response )' );
+
+ok( 'cancellation is checked before a transport error is concluded', false !== $at_cancel_check && false !== $at_error_branch && $at_cancel_check < $at_error_branch );
+ok( 'and a timeout is reported as such to the revert', false !== strpos( $batch_body, 'revert_after_cancel( $uuid, $mapped, is_wp_error( $response ) )' ) );
+
+/*
+ * CANCELLED IS FINAL, enforced in the repository rather than at each call site — there are
+ * several, and the next one added would not know to check.
+ */
+$repo = src( 'src/History/DeploymentRepository.php' );
+
+ok( 'a cancelled deployment cannot be written over', (bool) preg_match( '/function update\(.*?STATUS_CANCELLED === \$this->status_of\( \$id \).*?return;/s', $repo ) );
+ok( 'nor re-statused by anything but another cancel', (bool) preg_match( '/function set_status\(.*?STATUS_CANCELLED !== \$status && self::STATUS_CANCELLED === \$this->status_of\( \$id \)/s', $repo ) );
 // `$cancel` is the Production-side endpoint: it reports "nothing to undo" as a SUCCESS,
 // which is what makes calling it a second time safe.
 ok( 'which is safe because /cancel is idempotent', false !== strpos( $cancel, 'nothing_applied' ) );
 
 /*
- * The flag must exist from the MOMENT Cancel is pressed, not only once some batch has
- * created a record — cancelling before the first batch lands is exactly when none exists,
- * and also when a still-queued batch is most likely to slip through.
+ * ── CANCELLING IS A SEQUENCE, AND THE ORDER IS THE BUG ─────────────────────────────
  *
- * Scoped to DeploymentService::cancel()'s own body for the same reason the deploy_batch
- * assertions are: several methods in this file create deployment records.
+ * Reported as: cancel karne ke baad bhi kuch changes deploy ho jate hain.
+ *
+ * A push is not one request. Pressing Cancel stops the browser QUEUEING further batches;
+ * it cannot stop one already on the wire, and it cannot stop Production finishing the one
+ * it is processing. `deploy_batch()` reads the deployment record to decide whether to
+ * apply a batch's results — so the moment that flag is written decides the outcome.
+ *
+ * It used to be written AFTER the `/cancel` HTTP call returned. That call takes seconds,
+ * and a batch finishing inside that window read "not cancelled", applied its objects to
+ * Production and marked its rows deployed. The operator pressed Cancel and watched part of
+ * the push go live regardless.
+ *
+ * Ordering the local write FIRST closes the window completely: it is a database write, so
+ * it lands before any concurrent batch can look at it.
  */
-preg_match( '/function cancel\( string \$uuid.*?(?=function [a-z_]+\()/s', $service, $cancel_slice );
+$cancellation = src( 'src/Client/PushCancellation.php' );
 
-$cancel_body = (string) ( $cancel_slice[0] ?? '' );
+preg_match( '/function run\( string \$uuid.*?(?=function [a-z_]+\()/s', $cancellation, $run_slice );
 
-ok( 'the cancel body was isolated', '' !== $cancel_body && false === strpos( $cancel_body, 'function deploy_batch(' ) );
-ok( 'cancel records the state even with no record yet', (bool) preg_match( '/get_by_uuid\( \$uuid \).*?deployments->create\(\s*\$uuid.*?STATUS_CANCELLED/s', $cancel_body ) );
-ok( 'and it still restores the queue rows', false !== strpos( $cancel_body, 'restore_pending( $queue_ids )' ) );
+$run_body = (string) ( $run_slice[0] ?? '' );
+
+ok( 'the cancel sequence has its own class', false !== strpos( $cancellation, 'class PushCancellation' ) );
+ok( 'and the run body was isolated', '' !== $run_body );
+
+// THE ORDER. Marking cancelled must come before the queue restore, and both before any
+// network call — the sweep is where the network happens.
+$at_mark    = strpos( $run_body, 'mark_cancelled(' );
+$at_restore = strpos( $run_body, 'restore_pending(' );
+$at_sweep   = strpos( $run_body, 'sweep(' );
+
+ok( 'it records the cancellation first', false !== $at_mark && false !== $at_restore && $at_mark < $at_restore );
+ok( 'and before it touches Production', false !== $at_sweep && $at_mark < $at_sweep );
+ok( 'the local write never waits on the network', false === strpos( $run_body, "post( 'cancel'" ) );
+
+// The flag must exist from the MOMENT Cancel is pressed, not only once some batch has
+// created a record — cancelling before the first batch lands is exactly when none exists.
+ok( 'cancel records the state even with no record yet', (bool) preg_match( '/get_by_uuid\( \$uuid \).*?deployments->create\(\s*\$uuid.*?STATUS_CANCELLED/s', $cancellation ) );
+ok( 'and it still restores the queue rows', false !== strpos( $run_body, 'restore_pending( $queue_ids )' ) );
+
+/*
+ * ── AND ONE SWEEP CANNOT BE ENOUGH ─────────────────────────────────────────────────
+ *
+ * A batch that lands DURING the revert creates fresh snapshots on Production after the
+ * sweep has already passed over them. So the revert is repeated until Production reports
+ * it found nothing left to undo — that answer is the confirmation, and without it the
+ * cancel is only probably complete.
+ */
+ok( 'the revert repeats until nothing is left', false !== strpos( $cancellation, 'MAX_SWEEPS' ) );
+/*
+ * AN EMPTY PASS IS EVIDENCE, NOT A CONCLUSION.
+ *
+ * "Nothing to revert" has two opposite meanings: everything has been undone, or the batch
+ * has not landed YET. The second is common — cancelling quickly reaches Production before
+ * its import has registered anything, and a single empty pass then reported "nothing had
+ * reached Production" moments before the whole push went live.
+ */
+ok( 'an empty pass only counts toward the verdict', (bool) preg_match( '/\$clean = \( 0 === \$this_pass \) \? \$clean \+ 1 : 0;/', $cancellation ) );
+ok( 'and two consecutive ones are required', (bool) preg_match( '/\$clean >= self::CLEAN_PASSES/', $cancellation ) );
+ok( 'with a pause between, so Production can finish', false !== strpos( $cancellation, 'sleep( self::PAUSE_SECONDS )' ) );
+
+/*
+ * And a cancel must not be undone by the very next page load: the verifier resolves pending
+ * rows that match Production, which after a cancel is exactly the state a half-finished
+ * revert leaves behind. Those rows are exempt for a short grace period.
+ */
+$verifier = src( 'src/Client/QueueVerifier.php' );
+
+ok( 'restored rows are marked protected', false !== strpos( $queue, 'function is_protected(' ) );
+ok( 'restore_pending marks them', (bool) preg_match( '/function restore_pending\(.*?self::protect\( \$ids \)/s', $queue ) );
+ok( 'and the verifier leaves them alone', false !== strpos( $verifier, 'QueueRepository::is_protected(' ) );
+ok( 'the exemption expires on its own', false !== strpos( $queue, 'PROTECTED_FOR' ) );
+
+/*
+ * Running out of passes is a FAILURE, not a success with a caveat. The one thing a cancel
+ * must never do is report Production clean when it has not been shown to be.
+ */
+ok( 'exhausting the passes is reported as a failure', (bool) preg_match( "/MAX_SWEEPS.*?'ok'\s*=>\s*false/s", $cancellation ) );
 
 /*
  * And the cancel must never be REFUSED for ownership: aborting there would return before
@@ -248,6 +348,65 @@ ok( 'and it still restores the queue rows', false !== strpos( $cancel_body, 'res
 $ajax_src = src( 'src/Admin/Ajax.php' );
 ok( 'the cancel narrows silently rather than refusing', (bool) preg_match( '/function push_cancel\(.*?queue_ids\( false \)/s', $ajax_src ) );
 ok( 'while an ordinary push still refuses', (bool) preg_match( '/function queue_ids\( bool \$refuse = true \)/', $ajax_src ) );
+
+echo "\n=== Compare & Sync can push several rows at once ===\n";
+//
+// Compare is NOT the queue. Its rows are objects whose content differs from Production's,
+// which includes things nobody edited on Staging — so most of them have no queue row, and
+// the queue planner cannot be reused.
+$compare_page = src( 'src/Admin/Pages/ComparePage.php' );
+
+ok( 'rows carry a checkbox', false !== strpos( $compare_page, 'ifs-deploy-compare-item' ) );
+ok( 'with a select-all', false !== strpos( $compare_page, 'ifs-deploy-compare-all' ) );
+ok( 'and a bulk push button', false !== strpos( $compare_page, 'ifs-deploy-compare-push' ) );
+
+/*
+ * PER GROUP, not per screen. "Different" overwrites content on Production and "Not on
+ * Production" creates content that is not there — two different actions, so one shared
+ * selection could not be confirmed honestly.
+ */
+ok( 'selection is scoped to its group', false !== strpos( $compare_page, 'data-group' ) );
+ok( 'the two groups are named', false !== strpos( $compare_page, "'different'" ) && false !== strpos( $compare_page, "'missing'" ) );
+
+// Only the actionable tables get checkboxes — "In sync" has nothing to push.
+ok( 'checkboxes are gated on the action column', (bool) preg_match( '/if \( \$with_action \) \{\s*printf\(/s', $compare_page ) );
+
+echo "\n=== and it goes through the same batched pusher ===\n";
+
+ok( 'there is a plan endpoint for posts', (bool) preg_match( '/function compare_plan\(\).*?plan_posts\(/s', $ajax ) );
+ok( 'and a batch endpoint', (bool) preg_match( '/function compare_batch\(\).*?deploy_post_batch\(/s', $ajax ) );
+
+// Administrator-only, like the screen. No ownership narrowing, because Compare is not a
+// list of anyone's pending work — it is the state of the two sites.
+foreach ( array( 'compare_plan', 'compare_batch' ) as $method ) {
+	ok( "{$method} is administrator-only", (bool) preg_match( '/function ' . $method . '\(\): void \{\s*\$this->guard\(\);/', $ajax ) );
+	ok( "{$method} refuses to run on Production", (bool) preg_match( '/function ' . $method . '\(\).*?require_staging\(\)/s', $ajax ) );
+}
+
+/*
+ * The ids are POST ids, so they must never be read as queue row ids — and this has to be
+ * checked inside post_ids()'s OWN body. `queue_ids()` sits in the same file and does narrow
+ * by ownership, so an unanchored search would find its call and pass regardless.
+ */
+preg_match( '/function post_ids\(\): array \{.*?(?=function [a-z_]+\()/s', $ajax, $post_ids_slice );
+
+$post_ids_body = (string) ( $post_ids_slice[0] ?? '' );
+
+ok( 'the post_ids body was isolated', '' !== $post_ids_body );
+ok( 'it reads post ids', false !== strpos( $post_ids_body, "\$_POST['post_ids']" ) );
+ok( 'and does NOT narrow by ownership', false === strpos( $post_ids_body, 'ids_owned_by' ) );
+
+echo "\n=== a Compare push must never restore queue rows by post id ===\n";
+//
+// `restore_pending()` resets queue rows BY ROW ID. Sending post ids to it on a cancel would
+// flip whichever unrelated rows happened to carry those numbers back to pending — silently
+// resurrecting changes nobody asked for.
+ok( 'the sources declare whether they restore', (bool) preg_match( '/compare: \{.*?restores: false/s', $js ) );
+ok( 'the queue source does', (bool) preg_match( '/queue: \{.*?restores: true/s', $js ) );
+ok( 'and the cancel honours it', false !== strpos( $js, 'push.source.restores ? push.all : []' ) );
+
+// Compare sends post ids under their own name, so a mix-up cannot happen server-side either.
+ok( 'the compare source names its id field', (bool) preg_match( "/compare: \{.*?idField: 'post_ids'/s", $js ) );
 
 echo "\n=== Reset All Plugin Data clears state and NEVER content ===\n";
 //
@@ -312,9 +471,22 @@ ok( 'and the service calls it', false !== strpos( $service, 'restore_pending(' )
  */
 ok( 'deployed_hash is cleared, not guessed at', (bool) preg_match( "/deployed_hash = ''/", $queue ) );
 
-// Restored even when Production could not be reached: an unknown remote state must leave
-// the row pending, never deployed.
-ok( 'the rows are restored even if the undo failed', (bool) preg_match( '/\$restored = \$this->queue->restore_pending\(.*?is_wp_error\(\s*\$response\s*\)/s', $service ) );
+/*
+ * Restored even when Production could not be reached: an unknown remote state must leave
+ * the row pending, never deployed.
+ *
+ * The restore now happens BEFORE the sweep that talks to Production, so the guarantee is
+ * structural rather than a matter of which branch runs — there is no path through run()
+ * that reaches the network without having put the rows back first.
+ */
+ok(
+	'the rows are restored before Production is contacted at all',
+	false !== $at_restore && false !== $at_sweep && $at_restore < $at_sweep
+);
+ok(
+	'and a transport failure still reports the rows are safe',
+	false !== strpos( $cancellation, 'your changes are still listed here, but Production could not be reached' )
+);
 
 echo "\n=== the progress the user sees is real ===\n";
 

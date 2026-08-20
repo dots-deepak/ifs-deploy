@@ -87,6 +87,12 @@ final class Assets {
 					 */
 					'pushProgress'          => __( '%1$d of %2$d items — %3$d% complete', 'ifs-deploy' ),
 					'pushComplete'          => __( 'Finished. Refreshing the list…', 'ifs-deploy' ),
+					/* translators: 1: how many rows are ticked, 2: how many there are */
+					'compareSelected'       => __( '%1$d of %2$d selected', 'ifs-deploy' ),
+					/* translators: %d: how many objects will be overwritten on Production */
+					'compareConfirmOverwrite' => __( '%d objects will be pushed, replacing whatever Production currently has for them. This list is everything that DIFFERS — which can include pages edited directly on Production. Those edits will be overwritten.', 'ifs-deploy' ),
+					/* translators: %d: how many objects will be created on Production */
+					'compareConfirmCreate'  => __( '%d objects will be created on Production. They do not exist there yet, so nothing is overwritten.', 'ifs-deploy' ),
 					'pushPhaseMedia'        => __( 'Uploading media…', 'ifs-deploy' ),
 					'pushPhaseTerm'         => __( 'Syncing categories and tags…', 'ifs-deploy' ),
 					'pushPhasePost'         => __( 'Syncing posts and pages…', 'ifs-deploy' ),
@@ -101,7 +107,9 @@ final class Assets {
 					'pushEtaMinutes'        => __( 'About %d minutes remaining', 'ifs-deploy' ),
 					'pushEtaAlmost'         => __( 'Almost done…', 'ifs-deploy' ),
 					'pushCancel'            => __( 'Cancel push', 'ifs-deploy' ),
-					'pushCancelling'        => __( 'Stopping, and undoing what has already been sent…', 'ifs-deploy' ),
+					'pushCancelTitle'       => __( 'Cancelling push', 'ifs-deploy' ),
+					'pushCancelling'        => __( 'Undoing anything already sent, then checking Production is clean. This can take a few seconds.', 'ifs-deploy' ),
+					'pushCancelWait'        => __( 'Please keep this tab open.', 'ifs-deploy' ),
 					/* translators: %d: number of items pushed */
 					'pushDone'              => __( 'Pushed %d items to Production.', 'ifs-deploy' ),
 					'working'               => __( 'Working…', 'ifs-deploy' ),

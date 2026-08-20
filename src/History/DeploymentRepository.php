@@ -53,6 +53,22 @@ final class DeploymentRepository {
 		global $wpdb;
 
 		/*
+		 * CANCELLED IS FINAL. Nothing may write over it.
+		 *
+		 * The flag is what `DeploymentService::send_batch()` reads to decide whether to
+		 * apply a batch's results, so overwriting it re-arms a push the operator has
+		 * already stopped. That is not hypothetical: a batch that TIMED OUT used to write
+		 * STATUS_FAILED here, erasing the cancellation — and any batch still to come then
+		 * read the push as live and applied itself.
+		 *
+		 * Enforced at the repository rather than at each call site, because there are
+		 * several and the next one added would not know to check.
+		 */
+		if ( self::STATUS_CANCELLED === $this->status_of( $id ) ) {
+			return;
+		}
+
+		/*
 		 * `?? '[]'` so the column always holds VALID JSON.
 		 *
 		 * A failed encode used to store false, which `$wpdb` writes as an empty string;
@@ -75,6 +91,12 @@ final class DeploymentRepository {
 
 	public function set_status( int $id, string $status ): void {
 		global $wpdb;
+
+		// Same rule as update(): a cancelled deployment stays cancelled. Re-applying
+		// CANCELLED itself is allowed, so a second cancel is harmless.
+		if ( self::STATUS_CANCELLED !== $status && self::STATUS_CANCELLED === $this->status_of( $id ) ) {
+			return;
+		}
 		$wpdb->update(
 			Schema::deployments_table(),
 			array( 'deployment_status' => $status ),
@@ -110,6 +132,19 @@ final class DeploymentRepository {
 
 		return (int) $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
 			$wpdb->prepare( "DELETE FROM {$table} WHERE deployed_at < %s", $cutoff ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+	}
+
+	/**
+	 * The stored status of one deployment, or '' when there is no such row.
+	 */
+	private function status_of( int $id ): string {
+		global $wpdb;
+
+		$table = Schema::deployments_table();
+
+		return (string) $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->prepare( "SELECT deployment_status FROM {$table} WHERE id = %d", $id ) // phpcs:ignore WordPress.DB.PreparedSQL
 		);
 	}
 

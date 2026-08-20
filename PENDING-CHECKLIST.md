@@ -1,10 +1,12 @@
 # IFS Deploy — Checklist
 
-**Build:** `ifs-deploy-0.12.1.zip` · DB v10 · 2054 tests green · 17 August 2026
+**Last build:** `ifs-deploy-0.12.3.zip` · DB v10 · 2111 tests green · 18 August 2026
+**Working tree is ahead of that build** — see the Pending item.
 
 Priority is **1–10**, where 10 must happen first.
 
-> Everything else on the live pair has been tested and confirmed working. One item is left.
+> Everything else on the live pair has been tested and confirmed working. **One item is
+> left**, and it needs a build first — the fix for it is not in `ifs-deploy-0.12.3.zip`.
 
 ---
 
@@ -18,19 +20,11 @@ Priority is **1–10**, where 10 must happen first.
   - pushing those same rows again straight afterwards works normally.
 
   Press Cancel **while a batch is mid-flight**, not in the gap between two — that is the
-  case that was broken. A batch already on the wire kept running and marked its rows
-  deployed *after* the cancel had put them back, so they vanished from the list. Fixed in
-  the working tree; not yet in any build.
-
-- **(7) Rollback permissions.** As **User A**, push a change, then roll it back — should
-  work. As **User B** (not an admin, but with the rollback permission), open Deployment
-  History: A's deployment should show a dash instead of a Rollback button, with a tooltip
-  naming A. As an **administrator**, both should be rollback-able. Until now anyone holding
-  the rollback permission could undo *anyone's* deployment, including one they were never
-  allowed to push. Fixed in the working tree; not yet in any build.
-
-  Worth doing because it is the only operation that changes Production *without* you
-  asking for a change — it reverts. Use throwaway content the first time.
+  case that was broken, twice over. A batch already on the wire kept running and marked its
+  rows deployed *after* the cancel had put them back; and the cancellation was written down
+  only after the round trip to Production finished, so a batch completing inside that window
+  read "not cancelled" and went live anyway. Both fixed in the working tree; not yet in any
+  build.
 
 ---
 
@@ -65,6 +59,7 @@ Priority is **1–10**, where 10 must happen first.
 - Editor permission refusals explain themselves.
 
 **Elsewhere**
+- Rollback permissions — only the person who pushed it, or an administrator, can undo it.
 - Action column names the real action (Trashed / Restored / Updated / Published).
 - Settings save uses the plugin's own toast.
 - Duplicate Pending Changes entries.

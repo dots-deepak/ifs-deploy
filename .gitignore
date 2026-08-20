@@ -26,6 +26,9 @@ tools/
 .vscode/
 .idea/
 
+# Word's lock file for an open document. Appears whenever the guide is being read.
+~$*
+
 # --- Local noise ------------------------------------------------------------
 *.log
 *.sql

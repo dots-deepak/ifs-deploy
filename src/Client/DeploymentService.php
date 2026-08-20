@@ -175,6 +175,46 @@ final class DeploymentService {
 	}
 
 	/**
+	 * Plan a batched push of POSTS, for Compare & Sync.
+	 *
+	 * The queue planner cannot be reused: it starts from queue rows, and most Compare rows
+	 * have none — they are objects whose content differs from Production's, which includes
+	 * things nobody edited on Staging.
+	 *
+	 * No dependency sort here, and that is deliberate rather than an omission. Compare only
+	 * ever lists posts, so every item has the same rank and sorting would be a no-op. The
+	 * media a post references is handled by the importer, which resolves attachments as it
+	 * imports the post.
+	 *
+	 * @param int[] $post_ids
+	 *
+	 * @return array{uuid:string,batches:array<int,array<int,array{id:int,type:string,title:string}>>,total:int}
+	 */
+	public function plan_posts( array $post_ids ): array {
+		$items = array();
+
+		foreach ( $post_ids as $post_id ) {
+			$post = get_post( (int) $post_id );
+
+			if ( ! $post instanceof \WP_Post ) {
+				continue;
+			}
+
+			$items[] = array(
+				'id'    => (int) $post->ID,
+				'type'  => 'post',
+				'title' => (string) $post->post_title,
+			);
+		}
+
+		return array(
+			'uuid'    => wp_generate_uuid4(),
+			'batches' => array_chunk( $items, self::BATCH_SIZE ),
+			'total'   => count( $items ),
+		);
+	}
+
+	/**
 	 * Send ONE batch of an already-planned push.
 	 *
 	 * Every batch carries the same uuid, so Production files them all under one
@@ -227,6 +267,70 @@ final class DeploymentService {
 			$mapped[ self::map_key( (string) $item->object_type, (int) $item->object_id ) ] = (int) $item->id;
 		}
 
+		return $this->send_batch( $uuid, $objects, $mapped, $user_id, $failed );
+	}
+
+	/**
+	 * Build the packages for a batch of POSTS, then send it exactly as a queue batch.
+	 *
+	 * ── WHY THIS EXISTS SEPARATELY ─────────────────────────────────────────────────
+	 *
+	 * Compare & Sync is not backed by the queue. Its rows are objects whose CONTENT differs
+	 * from Production's — which includes things nobody edited on Staging at all, so many of
+	 * them have no queue row to plan from. `deploy_batch()` can only start from queue ids,
+	 * so pushing several rows from Compare had to go through the single blocking request in
+	 * `deploy_posts()`: no progress, no cancel, and one request having to survive however
+	 * many objects were picked.
+	 *
+	 * Everything after the packages are built is identical, and that is the part worth not
+	 * duplicating — it carries the deployment record, the locks and the cancellation checks.
+	 * Hence the split: the two entry points differ only in where their packages come from.
+	 *
+	 * @param int[] $post_ids
+	 */
+	public function deploy_post_batch( string $uuid, array $post_ids, int $user_id ): array {
+		$objects = array();
+		$mapped  = array();
+
+		foreach ( $post_ids as $post_id ) {
+			$post_id = (int) $post_id;
+			$package = $this->exporter->export( $post_id );
+
+			if ( null === $package ) {
+				DebugLog::error(
+					'Could not build a deployment package for a Compare & Sync row',
+					array( 'post_id' => $post_id )
+				);
+
+				continue;
+			}
+
+			$objects[] = $package;
+
+			// If this post is ALSO a pending change, its queue row is marked deployed by the
+			// results — so pushing from Compare clears it from Pending Changes too, rather
+			// than leaving a row proposing a change that has already been made.
+			$queue_item = $this->queue->find_by_object_id( $post_id );
+
+			$mapped[ self::map_key( 'post', $post_id ) ] = $queue_item ? (int) $queue_item->id : 0;
+		}
+
+		return $this->send_batch( $uuid, $objects, $mapped, $user_id, 0 );
+	}
+
+	/**
+	 * Send one already-built batch: lock, record, transmit, apply the results.
+	 *
+	 * Shared by the queue path and the Compare path so the deployment record, the locking
+	 * and both halves of the cancellation race are written once. Splitting these would mean
+	 * two copies of the most delicate code in the plugin.
+	 *
+	 * @param array          $objects Packages to send.
+	 * @param array<string,int> $mapped "type|object_id" => queue id (0 when there is none).
+	 * @param int            $failed  Packages that could not be built and are already
+	 *                                marked failed — see the empty-batch branch.
+	 */
+	private function send_batch( string $uuid, array $objects, array $mapped, int $user_id, int $failed ): array {
 		if ( empty( $objects ) ) {
 			/*
 			 * NOTHING WAS SENT — and whether that is fine depends entirely on WHY.
@@ -352,6 +456,27 @@ final class DeploymentService {
 				)
 			);
 
+			/*
+			 * ── CANCELLED IS CHECKED BEFORE ANYTHING ELSE IS CONCLUDED ────────────────
+			 *
+			 * Including before a transport error, and that ordering is the fix.
+			 *
+			 * A TIMEOUT IS NOT A FAILURE TO DEPLOY. When Production takes longer than this
+			 * side is willing to wait — a batch of media downloads routinely does — the
+			 * request returns a WP_Error while Production carries on and applies every
+			 * object in it. The old branch below then did two harmful things: it returned
+			 * without re-cancelling, so nothing undid what Production went on to apply; and
+			 * it wrote STATUS_FAILED over STATUS_CANCELLED, erasing the very flag that
+			 * tells a later batch not to apply itself.
+			 *
+			 * So the push was cancelled, Production published it anyway, and the record no
+			 * longer said it had been cancelled at all. Reported as "cancel karne ke baad
+			 * bhi ek change prod pe chala gaya".
+			 */
+			if ( self::is_cancelled( $this->deployments->get_by_uuid( $uuid ) ) ) {
+				return $this->revert_after_cancel( $uuid, $mapped, is_wp_error( $response ) );
+			}
+
 			if ( is_wp_error( $response ) ) {
 				$message = $this->transport_message( $response );
 
@@ -372,50 +497,6 @@ final class DeploymentService {
 
 			$body    = (array) $response['body'];
 			$results = is_array( $body['results'] ?? null ) ? $body['results'] : array();
-
-			/*
-			 * ── CANCELLED WHILE THIS REQUEST WAS IN FLIGHT ─────────────────────────────
-			 *
-			 * THE BUG THIS FIXES: cancelling a push removed rows from Pending Changes.
-			 *
-			 * Cancel and the batch it interrupts are two separate HTTP requests running at
-			 * the same time, and the browser cannot stop the one already on the wire — the
-			 * server goes on processing it whatever the browser does with the response. So:
-			 *
-			 *   1. batch N is in flight; Production is applying it
-			 *   2. the user presses Cancel
-			 *   3. /cancel reverts what had landed, and `restore_pending()` puts every row
-			 *      back to pending on this side
-			 *   4. batch N *finishes* — and `apply_results()` below marked its rows
-			 *      DEPLOYED, undoing step 3
-			 *   5. the page reloads and those rows are gone from Pending Changes
-			 *
-			 * The user's work disappeared because a request the cancel was meant to stop
-			 * outlived it. "I cancelled a push" never means "discard those changes".
-			 *
-			 * Two things are needed, not one. The rows go back (again, and this time last),
-			 * and Production is told to undo THIS batch too — it applied after the cancel
-			 * had already swept the deployment, so its objects are live and its snapshots
-			 * are new. `/cancel` is idempotent by design, which is what makes calling it a
-			 * second time safe.
-			 */
-			if ( self::is_cancelled( $this->deployments->get_by_uuid( $uuid ) ) ) {
-				DebugLog::warning(
-					'A batch completed after its push had been cancelled; reverting it and returning the rows to Pending Changes',
-					array( 'uuid' => $uuid, 'objects' => count( $objects ) )
-				);
-
-				$this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
-				$this->queue->restore_pending( array_values( $mapped ) );
-
-				return array(
-					'ok'      => false,
-					'message' => __( 'This push was cancelled while the last batch was still being sent. That batch has been undone on Production, and your changes are still listed here.', 'ifs-deploy' ),
-					'uuid'    => $uuid,
-					'status'  => DeploymentRepository::STATUS_CANCELLED,
-					'results' => 0,
-				);
-			}
 
 			$this->apply_results( $results, $mapped );
 
@@ -457,6 +538,42 @@ final class DeploymentService {
 		} finally {
 			$lock->release_all();
 		}
+	}
+
+	/**
+	 * Undo a batch that completed after its push had already been cancelled.
+	 *
+	 * ── WHY THE BATCH HAS TO DO THIS AT ALL ────────────────────────────────────────
+	 *
+	 * The cancel itself already swept Production. This batch landed BEHIND that sweep, so
+	 * its objects are live and its snapshots are new — the sweep passed over them before
+	 * they existed. Nothing else is in a position to notice: the browser has moved on, and
+	 * the cancel request finished long ago.
+	 *
+	 * `/cancel` is idempotent by design, which is what makes calling it again safe.
+	 *
+	 * @param bool $timed_out True when this side gave up waiting. Production kept working,
+	 *                        so it may still be applying objects as this runs — worth
+	 *                        saying, because the revert can only undo what has landed.
+	 */
+	private function revert_after_cancel( string $uuid, array $mapped, bool $timed_out ): array {
+		DebugLog::warning(
+			'A batch finished after its push was cancelled; reverting it on Production',
+			array( 'uuid' => $uuid, 'timed_out' => $timed_out )
+		);
+
+		$this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
+		$this->queue->restore_pending( array_values( $mapped ) );
+
+		return array(
+			'ok'      => false,
+			'uuid'    => $uuid,
+			'status'  => DeploymentRepository::STATUS_CANCELLED,
+			'results' => 0,
+			'message' => $timed_out
+				? __( 'This push was cancelled while Production was still working on the last batch. What it had applied has been undone, and your changes are still listed here — check Deployment History on Production if anything looks wrong.', 'ifs-deploy' )
+				: __( 'This push was cancelled while the last batch was still being sent. That batch has been undone on Production, and your changes are still listed here.', 'ifs-deploy' ),
+		);
 	}
 
 	/**
@@ -763,94 +880,21 @@ final class DeploymentService {
 	 * @return array{ok:bool,message:string}
 	 */
 	public function cancel( string $uuid, array $queue_ids ): array {
-		$response = $this->client->post( 'cancel', array( 'deployment_uuid' => $uuid ) );
-
 		/*
-		 * MARK IT CANCELLED HERE TOO, and do it whatever Production says.
+		 * Delegated in full — see `PushCancellation`.
 		 *
-		 * A batched push now opens a history record on this side, so a cancelled one would
-		 * otherwise be left sitting at `pending` or `partial` — which is precisely the
-		 * state `can_rollback()` offers a Rollback button for. That button would propose
-		 * undoing a deployment whose snapshots the cancel has already applied and deleted:
-		 * it would re-apply the very state the cancel just reverted.
-		 *
-		 * Unconditional on purpose. If Production could not be reached, this push is still
-		 * not something to offer a rollback of — the honest reading of an unknown remote
-		 * state is "do not offer to undo it again", and the message below already tells the
-		 * operator to check Production directly.
+		 * Cancelling is a SEQUENCE, not a call: record it locally before any network
+		 * request (so a batch still in flight cannot read "not cancelled" and apply
+		 * itself), put the queue rows back, revert Production, then confirm nothing
+		 * landed behind the revert. Doing that inline here is how the ordering went
+		 * wrong in the first place.
 		 */
-		/*
-		 * RECORDED BEFORE ANYTHING ELSE, and recorded even when there is no record yet.
-		 *
-		 * This is the flag `deploy_batch()` reads to refuse a batch that is still in flight
-		 * or about to be sent — so it has to exist from the moment Cancel is pressed, not
-		 * only once some batch has happened to create a deployment row. Cancelling before
-		 * the first batch lands is exactly when no row exists, and it is also when a
-		 * still-queued batch is most likely to slip through.
-		 *
-		 * Creating it also means a cancelled push appears in Deployment History at all,
-		 * which it previously did not when it was stopped early.
-		 */
-		$deployment = $this->deployments->get_by_uuid( $uuid );
-
-		$this->deployments->set_status(
-			null !== $deployment
-				? (int) $deployment->id
-				: $this->deployments->create( $uuid, get_current_user_id(), DeploymentRepository::STATUS_CANCELLED ),
-			DeploymentRepository::STATUS_CANCELLED
-		);
-
-		/*
-		 * The queue is restored EVEN IF the remote call failed.
-		 *
-		 * If Production could not be reached, the safest assumption is that its state is
-		 * unknown — and an unknown state must leave the row pending rather than deployed.
-		 * `restore_pending()` also clears `deployed_hash`, so nothing later treats the row
-		 * as already-pushed. Erring the other way would drop someone's work out of Pending
-		 * Changes on the strength of a request that never arrived.
-		 */
-		$restored = $this->queue->restore_pending( $queue_ids );
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'ok'      => false,
-				'message' => sprintf(
-					/* translators: %s: underlying transport error */
-					__( 'The push was stopped, but Production could not be reached to undo what had already been sent (%s). Check Deployment History on Production and roll that deployment back if part of it is live. Your changes are still listed here.', 'ifs-deploy' ),
-					$response->get_error_message()
-				),
-			);
-		}
-
-		$body = (array) ( $response['body'] ?? array() );
-
-		if ( 200 !== (int) $response['status'] || empty( $body['ok'] ) ) {
-			return array(
-				'ok'      => false,
-				'message' => (string) ( $body['error'] ?? __( 'The push was stopped, but Production did not confirm the undo. Check Deployment History there. Your changes are still listed here.', 'ifs-deploy' ) ),
-			);
-		}
-
-		if ( ! empty( $body['nothing_applied'] ) ) {
-			return array(
-				'ok'      => true,
-				'message' => __( 'Push cancelled. Nothing had reached Production yet, so nothing needed undoing — your changes are still listed here.', 'ifs-deploy' ),
-			);
-		}
+		$result = ( new PushCancellation( $this->client, $this->queue, $this->deployments ) )
+			->run( $uuid, $queue_ids );
 
 		return array(
-			'ok'      => true,
-			'message' => sprintf(
-				/* translators: 1: objects reverted on Production, 2: rows returned to the list */
-				_n(
-					'Push cancelled. %1$d change already sent was undone on Production, and %2$d item is still listed here.',
-					'Push cancelled. %1$d changes already sent were undone on Production, and %2$d items are still listed here.',
-					(int) ( $body['restored'] ?? 0 ),
-					'ifs-deploy'
-				),
-				(int) ( $body['restored'] ?? 0 ),
-				$restored
-			),
+			'ok'      => (bool) $result['ok'],
+			'message' => (string) $result['message'],
 		);
 	}
 

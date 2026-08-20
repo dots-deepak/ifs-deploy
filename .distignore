@@ -64,6 +64,12 @@ node_modules
 package.json
 package-lock.json
 
+# --- Client deliverables ----------------------------------------------------
+#
+# The user guide is written FOR the client and sent to them directly. It is not part of
+# the plugin, and a Word document inside a plugin zip is just dead weight on the server.
+*.docx
+
 # --- Build output -----------------------------------------------------------
 *.zip
 

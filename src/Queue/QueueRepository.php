@@ -586,13 +586,68 @@ final class QueueRepository {
 		$table        = Schema::queue_table();
 		$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
 
-		return (int) $wpdb->query( // phpcs:ignore WordPress.DB
+		$moved = (int) $wpdb->query( // phpcs:ignore WordPress.DB
 			$wpdb->prepare(
 				// phpcs:ignore WordPress.DB.PreparedSQL
 				"UPDATE {$table} SET status = %s, deployed_hash = '', updated_at = %s WHERE id IN ({$placeholders})",
 				array_merge( array( self::STATUS_PENDING, current_time( 'mysql' ) ), $ids )
 			)
 		);
+
+		self::protect( $ids );
+
+		return $moved;
+	}
+
+	/**
+	 * Transient naming the rows a cancel has just put back.
+	 *
+	 * ── WHY THIS IS NEEDED ─────────────────────────────────────────────────────────
+	 *
+	 * Cancelling restores the rows, and then the page reloads straight into
+	 * `QueueVerifier`, which asks Production whether each pending row still differs and
+	 * quietly resolves the ones that do not. If the revert has not finished — Production
+	 * may still be applying the batch this side gave up waiting for — the content matches
+	 * for a moment, and the verifier removes the very rows the cancel just rescued.
+	 *
+	 * From the operator's side that is indistinguishable from the bug they reported:
+	 * "cancel kiya, phir bhi Pending Changes se rows chali gayi". A cancel means "not
+	 * yet", never "discard this" — so for a short window after one, these rows are left
+	 * alone whatever Production currently says.
+	 *
+	 * Short-lived on purpose. It is a grace period, not a permanent exemption: once it
+	 * lapses the verifier resumes, and a row that genuinely no longer differs resolves
+	 * itself as it always did.
+	 */
+	private const PROTECTED_KEY = 'dp_cancel_protected';
+
+	private const PROTECTED_FOR = 300;
+
+	/**
+	 * @param int[] $ids
+	 */
+	private static function protect( array $ids ): void {
+		if ( empty( $ids ) ) {
+			return;
+		}
+
+		$existing = get_transient( self::PROTECTED_KEY );
+		$existing = is_array( $existing ) ? $existing : array();
+
+		set_transient(
+			self::PROTECTED_KEY,
+			array_values( array_unique( array_merge( $existing, array_map( 'absint', $ids ) ) ) ),
+			self::PROTECTED_FOR
+		);
+	}
+
+	/**
+	 * Was this row put back by a cancel recently enough to be left alone?
+	 */
+	public static function is_protected( int $queue_id ): bool {
+		$ids = get_transient( self::PROTECTED_KEY );
+
+		return is_array( $ids ) && in_array( $queue_id, array_map( 'absint', $ids ), true );
 	}
 
 	public function set_status( int $id, string $status ): void {

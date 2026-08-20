@@ -65,6 +65,22 @@ final class QueueVerifier {
 				continue;
 			}
 
+			/*
+			 * JUST PUT BACK BY A CANCEL — leave it alone.
+			 *
+			 * A cancel restores the rows and the page reloads straight into this check. If
+			 * the revert on Production has not finished — it may still be applying a batch
+			 * this side stopped waiting for — the content matches for a moment, and
+			 * resolving the row here removes the very change the cancel just rescued.
+			 *
+			 * The operator cannot tell that apart from the bug they reported: cancel kiya,
+			 * phir bhi Pending Changes se rows chali gayi. A cancel means "not yet", never
+			 * "discard this", so these rows are exempt for a short grace period.
+			 */
+			if ( QueueRepository::is_protected( (int) $row->id ) ) {
+				continue;
+			}
+
 			$package = $this->exporter->export( (int) $row->object_id );
 			if ( null === $package ) {
 				continue;

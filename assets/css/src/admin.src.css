@@ -2104,3 +2104,21 @@ body.ifs-deploy-modal-open {
 
 /* ---- Tailwind utilities: LAST, so they win over components (see header) ---- */
 @tailwind utilities;
+/* --- Compare & Sync: multi-select ------------------------------------------
+   The check column is narrow and top-aligned, because a Compare row's title can
+   wrap to three lines and a vertically centred box then floats away from it. */
+.ifs-deploy .ifs-deploy-compare .check-column {
+	width: 2.2rem;
+	padding-top: 12px;
+	vertical-align: top;
+}
+
+/* The bulk bar sits between the table's description and the table itself, so it
+   reads as belonging to that group rather than to the screen. */
+.ifs-deploy .ifs-deploy-compare-actions {
+	@apply tw-mb-3 tw-flex tw-items-center tw-gap-3;
+}
+
+.ifs-deploy .ifs-deploy-compare-count {
+	@apply tw-mt-0;
+}

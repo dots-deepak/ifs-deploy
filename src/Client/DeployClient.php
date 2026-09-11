@@ -79,7 +79,7 @@ final class DeployClient {
 
 			return new WP_Error(
 				'ifs_deploy_encode_failed',
-				__( 'This deployment could not be encoded as JSON, so nothing was sent. It usually means one object holds invalid text or is nested far deeper than expected — see IFS Deploy → Logs, and try pushing the items separately to find it.', 'ifs-deploy' )
+				__( 'This deployment could not be encoded as JSON, so nothing was sent. It usually means one object holds invalid text or is nested far deeper than expected — see Copperleaf Deploy → Logs, and try pushing the items separately to find it.', 'ifs-deploy' )
 			);
 		}
 

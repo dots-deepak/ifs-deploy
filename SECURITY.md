@@ -1,4 +1,4 @@
-# IFS Deploy — Security
+# Copperleaf Deploy — Security
 
 **Audited:** internal code review · **Verify with:** `php tests/run-all.php` (2065 assertions)
 

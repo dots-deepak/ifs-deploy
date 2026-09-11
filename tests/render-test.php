@@ -66,15 +66,35 @@ define( 'HOUR_IN_SECONDS', 3600 );
 define( 'DAY_IN_SECONDS', 86400 );
 define( 'WEEK_IN_SECONDS', 604800 );
 
-$GLOBALS['dp_caps'] = array( 'manage_options' => true );
+$GLOBALS['dp_caps'] = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 
 function current_user_can( string $cap ): bool {
+	/*
+	 * `manage_options` implies every IFS Deploy capability EXCEPT the restricted-screen
+	 * one. That separation is the entire point of Access::CAP_RESTRICTED — being an
+	 * administrator is necessary for Compare & Sync, Settings and Logs, and no longer
+	 * sufficient — so a stub that granted it along with the rest would render those
+	 * screens for somebody the real code refuses.
+	 */
+	if ( 'ifs_deploy_restricted' === $cap ) {
+		return ! empty( $GLOBALS['dp_caps']['ifs_deploy_restricted'] );
+	}
+
 	return ! empty( $GLOBALS['dp_caps'][ $cap ] ) || ! empty( $GLOBALS['dp_caps']['manage_options'] );
 }
 
 function __( string $text, string $domain = '' ): string {
 	return $text;
 }
+// The menu is registered and then removed on Production, and adds its own link to the
+// Plugins screen — so the file now touches these on load.
+function plugin_basename( string $file ): string {
+	return 'ifs-deploy/' . basename( $file );
+}
+function remove_menu_page( string $slug ) { $GLOBALS['dp_removed_menus'][] = $slug; return false; }
+
+if ( ! defined( 'IFS_DEPLOY_FILE' ) ) { define( 'IFS_DEPLOY_FILE', dirname( __DIR__ ) . '/ifs-deploy.php' ); }
+
 function wp_parse_url( string $url, int $component = -1 ) {
 	return -1 === $component ? parse_url( $url ) : parse_url( $url, $component );
 }
@@ -224,7 +244,7 @@ class DP_Test_Roles {
 
 	public function get_role( string $role ) {
 		if ( 'administrator' === $role ) {
-			return (object) array( 'capabilities' => array( 'manage_options' => true ) );
+			return (object) array( 'capabilities' => array( 'manage_options' => true, 'ifs_deploy_restricted' => true ) );
 		}
 
 		if ( in_array( $role, array_keys( $this->get_names() ), true ) ) {
@@ -354,6 +374,16 @@ function disabled( $disabled, $current = true, $display = true ) {
 }
 function apply_filters( string $hook, $value ) {
 	return $value;
+}
+class WP_Screen {
+	public string $id = '';
+
+	public function __construct( string $id = '' ) {
+		$this->id = $id;
+	}
+}
+function get_current_screen() {
+	return $GLOBALS['dp_screen'] ?? null;
 }
 function do_action( string $hook, ...$args ): void {}
 function add_action( string $hook, $callback, int $priority = 10, int $args = 1 ): bool {
@@ -580,7 +610,7 @@ echo "=== the settings forms still post what the handler reads ===\n";
 // The role matrix checkboxes were restyled into switches. A switch is CSS over a real
 // <input type="checkbox">, so the posted data must be byte-for-byte what it was — if a
 // name were lost, permissions would silently stop saving with no error anywhere.
-$GLOBALS['dp_caps'] = array( 'manage_options' => true );
+$GLOBALS['dp_caps'] = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 $_GET               = array( 'page' => 'ifs-deploy', 'tab' => 'settings' );
 
 $connection = IfsDeploy\Admin\Tabs::render( 'settings' );
@@ -649,7 +679,7 @@ foreach ( array( 'staging', 'production' ) as $role ) {
 		$sections = 'settings' === $slug ? array( 'connection', 'roles', 'logs' ) : array( '' );
 
 		foreach ( $sections as $section ) {
-			$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+			$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 			$GLOBALS['dp_options'] = array( 'ifs_deploy_role' => $role );
 
 			$_GET = array( 'page' => 'ifs-deploy', 'tab' => $slug );
@@ -689,7 +719,7 @@ echo "=== the Log Retention section renders ===\n";
 //
 // A new Settings section: rendered for real, because the earlier bug where roles_tab()
 // was never exercised (the default section is `connection`) hid a fatal for a whole pass.
-$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 $GLOBALS['dp_options'] = array();
 $_GET                  = array( 'page' => 'ifs-deploy', 'tab' => 'settings', 'section' => 'logs' );
 $errors                = array();
@@ -728,7 +758,7 @@ echo "=== the plugin is called IFS Deploy (display only) ===\n";
 // REST namespace, option keys or tables breaks a live paired installation. These
 // assertions pin both halves of that, so a later "let's finish the rename" cannot quietly
 // take out a working install.
-$GLOBALS['dp_caps'] = array( 'manage_options' => true );
+$GLOBALS['dp_caps'] = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 $_GET               = array( 'page' => 'ifs-deploy' );
 
 ob_start();
@@ -741,16 +771,21 @@ foreach ( array( 'overview', 'pending', 'compare', 'history', 'settings', 'logs'
 	$all_tabs .= IfsDeploy\Admin\Tabs::render( $slug );
 }
 
-// Nothing a user reads should still say the old name. `.dp-id`/class attributes are
-// lower-case `ifs-deploy`, so a case-sensitive search finds only prose and labels.
-ok( 'no visible "IFS Deploy" in the screen chrome', false === strpos( $branded, 'IfsDeploy' ) );
-ok( 'no visible "IFS Deploy" in any tab', false === strpos( $all_tabs, 'IfsDeploy' ) );
+/*
+ * Nothing a user reads should still carry an old name. Class attributes and the page slug
+ * are lower-case `ifs-deploy` and MUST stay that way, so these searches are case-sensitive
+ * and look only for the capitalised prose forms.
+ */
+ok( 'no visible "IfsDeploy" in the screen chrome', false === strpos( $branded, 'IfsDeploy' ) );
+ok( 'no visible "IfsDeploy" in any tab', false === strpos( $all_tabs, 'IfsDeploy' ) );
+ok( 'no visible "IFS Deploy" in the screen chrome', false === strpos( $branded, 'IFS Deploy' ) );
+ok( 'no visible "IFS Deploy" in any tab', false === strpos( $all_tabs, 'IFS Deploy' ) );
 
 // The heading is a TEXT wordmark; `.dp-brand-name` is the CSS/selector hook and is
 // asserted separately from what sits inside it, so the hook survives a change of mind
 // about the mark.
 ok( 'brand element is still .dp-brand-name', false !== strpos( $branded, 'class="dp-brand-name"' ) );
-ok( 'the wordmark reads "IFS Deploy"', false !== strpos( $branded, '<span class="dp-brand-name">IFS Deploy</span>' ) );
+ok( 'the wordmark reads "Copperleaf Deploy"', false !== strpos( $branded, '<span class="dp-brand-name">Copperleaf Deploy</span>' ) );
 ok( 'the header pulls in no image', 0 === preg_match( '/class="dp-brand-name"><img/', $branded ) );
 
 echo "=== the sidebar icon costs no request and no site-wide CSS ===\n";
@@ -789,7 +824,20 @@ ok( 'Assets prints no site-wide style', false === strpos( $assets_src, 'menu_ico
 // Each of these would break the live pair between two sites if renamed.
 $plugin_file = (string) file_get_contents( $root . '/ifs-deploy.php' );
 
-ok( 'plugin display name is IFS Deploy', false !== strpos( $plugin_file, 'Plugin Name:       IFS Deploy' ) );
+ok( 'plugin display name is Copperleaf Deploy', false !== strpos( $plugin_file, 'Plugin Name:       Copperleaf Deploy' ) );
+$menu_file = (string) file_get_contents( $root . '/src/Admin/AdminMenu.php' );
+
+ok( 'the sidebar menu says Copperleaf Deploy', false !== strpos( $menu_file, "__( 'Copperleaf Deploy', 'ifs-deploy' )" ) );
+ok( 'and no menu label still says IFS Deploy', false === strpos( $menu_file, "__( 'IFS Deploy', 'ifs-deploy' )" ) );
+
+/*
+ * ── THE RENAME MUST NOT REACH ANY USER-FACING STRING'S IDENTIFIERS ────────────────
+ *
+ * Every translatable string is fair game for a display rename; every identifier is not.
+ * Renaming the text domain orphans the whole translation catalogue, and renaming the REST
+ * namespace, page slug, option keys or tables breaks a pair of sites that are ALREADY
+ * talking to each other — the failure lands on the client's live site, not here.
+ */
 ok( 'text domain is unchanged', false !== strpos( $plugin_file, 'Text Domain:       ifs-deploy' ) );
 ok( 'REST namespace is unchanged', false !== strpos( (string) file_get_contents( $root . '/src/Rest/RestController.php' ), 'ifs-deploy/v1' ) );
 ok( 'admin page slug is unchanged', "ifs-deploy" === IfsDeploy\Admin\AdminMenu::SLUG );
@@ -972,7 +1020,7 @@ ok( 'old tab=roles lands on the settings tab', false !== strpos( $roles, 'tab=se
 
 /** Render the whole screen under a role, with a given tab requested. */
 function screen_as( string $role, string $tab = '', array $extra = array() ): string {
-	$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+	$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 	$GLOBALS['dp_options'] = array( 'ifs_deploy_role' => $role );
 
 	$_GET = array_merge( array( 'page' => 'ifs-deploy' ), '' !== $tab ? array( 'tab' => $tab ) : array(), $extra );
@@ -985,7 +1033,7 @@ function screen_as( string $role, string $tab = '', array $extra = array() ): st
 
 echo "=== Staging-only tabs are absent on Production ===\n";
 
-$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 $GLOBALS['dp_options'] = array( 'ifs_deploy_role' => 'production' );
 
 $prod_tabs = array_keys( IfsDeploy\Admin\Tabs::available() );
@@ -1054,7 +1102,7 @@ ok( 'a real permission refusal is unchanged', false !== strpos( IfsDeploy\Admin\
 
 echo "=== Role Management is hidden from Production's Settings ===\n";
 
-$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 $GLOBALS['dp_options'] = array( 'ifs_deploy_role' => 'production' );
 $_GET                  = array( 'page' => 'ifs-deploy', 'tab' => 'settings' );
 
@@ -1155,7 +1203,7 @@ ok( 'and states no filter', false === strpos( $stag_logs, 'warnings and errors o
 
 /** @return string Overview, rendered under a role with a given remote configuration. */
 function overview_as( string $role, array $remote = array(), array $options = array() ): string {
-	$GLOBALS['dp_caps']    = array( 'manage_options' => true );
+	$GLOBALS['dp_caps']    = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
 	$GLOBALS['dp_options'] = array_merge(
 		array(
 			'ifs_deploy_role'               => $role,
@@ -1375,6 +1423,107 @@ ok( 'and no longer fills it near-black', ! dp_css_has( $on_track, 'background-co
 ok( 'a locked ON toggle is muted green', dp_css_has( $locked_track, 'background-color:rgb(195 218 203' ) );
 // The knob position is the other half of the signal and must not have moved.
 ok( 'the knob still shifts when checked', dp_css_has( $on_knob, 'transform:translateX(16px)' ) );
+
+
+echo "=== the restriction explains itself ===
+";
+/*
+ * ── WHY THIS SCREEN EXISTS AT ALL ─────────────────────────────────────────────────
+ *
+ * The three restricted screens are deny-by-default, and Settings is one of them — so an
+ * administrator who is not on the list cannot grant themselves access from inside
+ * wp-admin. That is intentional: the list lives in a file precisely so the database
+ * cannot reach it.
+ *
+ * The failure mode without a notice is severe and silent. Tabs that were there yesterday
+ * are gone, Settings among them, and nothing anywhere says why — which is exactly what a
+ * broken plugin looks like. These assertions pin the escape hatch: the way back in is
+ * printed on a screen the affected person can still reach, with their own user id already
+ * in the line, so they never have to know the constant's name or find the documentation.
+ */
+$GLOBALS['dp_screen'] = new WP_Screen( 'toplevel_page_ifs-deploy' );
+$GLOBALS['dp_caps']   = array( 'manage_options' => true );  // administrator, NOT on the list
+
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+$unset_notice = (string) ob_get_clean();
+
+// The line is printed through esc_html(), so its quotes arrive as entities. Compare
+// against the decoded text — what the reader actually sees inside the <code> — rather
+// than weakening the assertion to something that would also pass on a mangled line.
+$unset_plain = html_entity_decode( $unset_notice, ENT_QUOTES, 'UTF-8' );
+
+ok( 'an affected administrator is told',   '' !== trim( $unset_notice ) );
+ok( 'it names the constant',               false !== strpos( $unset_notice, 'IFS_DEPLOY_ADMIN_USERS' ) );
+ok( 'it gives a line to paste',            false !== strpos( $unset_plain, "define( 'IFS_DEPLOY_ADMIN_USERS', '1' );" ) );
+ok( 'with THEIR id already in it',         false !== strpos( $unset_plain, "'1' );" ) );
+ok( 'and the line is escaped for output',  false !== strpos( $unset_notice, '&#039;' ) );
+ok( 'it points at wp-config.php',          false !== strpos( $unset_notice, 'wp-config.php' ) );
+ok( 'and it is a warning, not an error',   false !== strpos( $unset_notice, 'notice-warning' ) );
+
+// The scariest reading of a vanished Settings tab is "the plugin broke and my deployments
+// are gone". Saying plainly that pushing still works is most of the notice's value.
+ok( 'it says the rest still works', false !== strpos( $unset_notice, 'pending changes, pushing and rollback' ) );
+
+echo "=== and it stays out of everyone else's way ===
+";
+
+// Somebody WITH access is not nagged about a restriction that is working as configured.
+$GLOBALS['dp_caps'] = array( 'manage_options' => true, 'ifs_deploy_restricted' => true );
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+ok( 'an allowed administrator sees nothing', '' === trim( (string) ob_get_clean() ) );
+
+/*
+ * An Editor must not see it either, and not merely to reduce noise: these screens were
+ * never theirs, so the notice would be explaining the wrong reason — and it would hand a
+ * wp-config.php recipe to somebody with no business editing that file.
+ */
+$GLOBALS['dp_caps'] = array( 'ifs_deploy_access' => true );
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+ok( 'a non-administrator sees nothing', '' === trim( (string) ob_get_clean() ) );
+
+// Not a site-wide nag: a permanent banner on every admin page for a correctly configured
+// setting is its own bug.
+$GLOBALS['dp_caps']   = array( 'manage_options' => true );
+$GLOBALS['dp_screen'] = new WP_Screen( 'edit-post' );
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+ok( 'nothing on unrelated admin screens', '' === trim( (string) ob_get_clean() ) );
+
+/*
+ * The Plugins list is the exception, and a required one. On Production the sidebar entry is
+ * removed, so the plugin's own screens are not somewhere an affected administrator reliably
+ * lands — the Plugins list is.
+ */
+$GLOBALS['dp_screen'] = new WP_Screen( 'plugins' );
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+ok( 'but the Plugins list does show it', false !== strpos( (string) ob_get_clean(), 'IFS_DEPLOY_ADMIN_USERS' ) );
+
+echo "=== a list that exists but leaves you out reads differently ===
+";
+//
+// "Nobody is configured" and "you specifically are not on the list" send people to
+// different places. The second is where somebody stares at a line that looks correct,
+// so the notice must not claim the constant is missing when it is right there.
+define( 'IFS_DEPLOY_ADMIN_USERS', '5,9' );
+
+$GLOBALS['dp_screen'] = new WP_Screen( 'toplevel_page_ifs-deploy' );
+ob_start();
+( new IfsDeploy\Admin\RestrictionNotice() )->render();
+$listed_notice = (string) ob_get_clean();
+$listed_plain  = html_entity_decode( $listed_notice, ENT_QUOTES, 'UTF-8' );
+
+ok( 'it does not claim the constant is unset', false === strpos( $listed_notice, 'is not set in wp-config.php' ) );
+ok( 'it says being an administrator is not enough', false !== strpos( $listed_notice, 'not enough on its own' ) );
+
+// The suggested line ADDS the reader to the existing ids. Printing only their own id would
+// be an instruction to lock out everyone already listed.
+ok( 'the fix keeps the people already listed', false !== strpos( $listed_plain, "'5,9,1' );" ) );
+
+$GLOBALS['dp_screen'] = null;
 
 restore_error_handler();
 

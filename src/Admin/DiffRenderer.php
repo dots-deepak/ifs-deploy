@@ -250,7 +250,7 @@ final class DiffRenderer {
 
 		if ( PackageDiff::CHANGE_KEPT === $change ) {
 			$html .= '<p class="description ifs-deploy-diff-note">'
-				. esc_html__( 'Only on Production. IFS Deploy never deletes what a push does not mention, so this is left exactly as it is.', 'ifs-deploy' )
+				. esc_html__( 'Only on Production. Copperleaf Deploy never deletes what a push does not mention, so this is left exactly as it is.', 'ifs-deploy' )
 				. '</p>';
 		}
 

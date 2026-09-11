@@ -2,7 +2,26 @@
 declare(strict_types=1);
 
 function __( $s, $d = '' ) { return $s; }
-function add_filter( ...$a ) {}
+$GLOBALS['dp_filters'] = array();
+
+function add_filter( $tag, $cb = null, $p = 10, $a = 1 ) {
+	if ( null !== $cb ) {
+		$GLOBALS['dp_filters'][ $tag ][] = $cb;
+	}
+	return true;
+}
+
+function remove_restricted_filter() { unset( $GLOBALS['dp_filters']['ifs_deploy_admin_users'] ); }
+
+// `restricted_users()` offers a filter so the list can be moved to an mu-plugin without
+// editing the plugin — which is also how these tests drive it, since a constant cannot be
+// defined twice in one process.
+function apply_filters( $tag, $value, ...$args ) {
+	foreach ( $GLOBALS['dp_filters'][ $tag ] ?? array() as $cb ) {
+		$value = $cb( $value, ...$args );
+	}
+	return $value;
+}
 function absint( $v ) { return abs( (int) $v ); }
 function get_option( $n, $d = false ) { return $GLOBALS['dp_opt'][ $n ] ?? $d; }
 function update_option( $n, $v, $a = null ) { $GLOBALS['dp_opt'][ $n ] = $v; return true; }
@@ -175,6 +194,94 @@ foreach ( array( 'rollback', 'rollback_preview' ) as $method ) {
 $history_src = (string) php_strip_whitespace( __DIR__ . '/../src/Admin/Pages/HistoryPage.php' );
 
 ok( 'the History screen hides the button too', false !== strpos( $history_src, 'Access::may_act_on( (int) $deployment->deployed_by )' ) );
+
+echo "\n=== the three restricted screens ===\n";
+//
+// ── WHAT THIS IS ───────────────────────────────────────────────────────────────────
+//
+// Compare & Sync, Settings and Logs & Diagnostics were administrator-only, which on a site
+// with several administrators means everyone. Between them they expose the shared secret,
+// the API access log, and a screen that can overwrite Production wholesale — so a team can
+// hold them to named people, listed in wp-config.php.
+//
+// The constant cannot be defined twice in one process, so the list is driven here through
+// the filter the plugin offers for exactly that purpose.
+$GLOBALS['dp_allowed'] = array();
+
+add_filter( 'ifs_deploy_admin_users', static function ( $ids ) { return $GLOBALS['dp_allowed']; } );
+
+echo "\n--- nothing configured: NOBODY is allowed ---\n";
+//
+// DENY BY DEFAULT. No list means no one, not everyone. A restriction that has to be switched
+// ON is a restriction that is OFF wherever somebody forgot, lost the line in a wp-config
+// rewrite, or restored an older copy of the file — failing open at exactly the moment it was
+// meant to apply. These screens hold the shared secret, the API log and a button that
+// overwrites Production, so the safe direction is closed.
+//
+// Settings is itself one of the hidden screens, so this cannot be undone from inside
+// wp-admin — the point of putting the list in a file the database cannot reach. What stops
+// it being a dead end is Admin RestrictionNotice, which prints the exact line to add with
+// the reader's own user id already in it. Pinned in tests/render-test.php.
+$GLOBALS['dp_allowed'] = array();
+
+ok( 'an unset list allows nobody',     false === Access::may_use_restricted_screens( 7 ) );
+ok( 'and a user id of 0 least of all', false === Access::may_use_restricted_screens( 0 ) );
+
+$admin = caps_for( array( 'manage_options' => true ), user( 7, array( 'administrator' ) ) );
+ok( 'so not even an administrator gets the screens', empty( $admin[ Access::CAP_RESTRICTED ] ) );
+
+// Shut out of the three screens is NOT shut out of the plugin, or every site without the
+// constant would lose pushing the moment it updated.
+ok( 'but the administrator keeps plugin access', ! empty( $admin[ Access::CAP_ACCESS ] ) );
+ok( 'and keeps pushing',                         ! empty( $admin[ Access::CAP_DEPLOY ] ) );
+ok( 'and keeps rollback',                        ! empty( $admin[ Access::CAP_ROLLBACK ] ) );
+
+echo "\n--- a list of named users ---\n";
+$GLOBALS['dp_allowed'] = array( 1, 7 );
+
+ok( 'a named user is allowed',         true === Access::may_use_restricted_screens( 7 ) );
+ok( 'and the other named one too',     true === Access::may_use_restricted_screens( 1 ) );
+ok( 'an unnamed administrator is not', false === Access::may_use_restricted_screens( 9 ) );
+ok( 'nor is a logged-out request',     false === Access::may_use_restricted_screens( 0 ) );
+
+$named   = caps_for( array( 'manage_options' => true ), user( 7, array( 'administrator' ) ) );
+$unnamed = caps_for( array( 'manage_options' => true ), user( 9, array( 'administrator' ) ) );
+
+ok( 'the named administrator gets the capability', ! empty( $named[ Access::CAP_RESTRICTED ] ) );
+ok( 'the unnamed one does not',                    empty( $unnamed[ Access::CAP_RESTRICTED ] ) );
+
+/*
+ * AND THE REST OF THE PLUGIN IS UNTOUCHED.
+ *
+ * The restriction hides three screens; it does not remove somebody from the plugin. An
+ * administrator who is not on the list still has Overview, Pending Changes and Deployment
+ * History, and can still push and roll back their own work.
+ */
+ok( 'an unnamed administrator keeps access', ! empty( $unnamed[ Access::CAP_ACCESS ] ) );
+ok( 'keeps push',                            ! empty( $unnamed[ Access::CAP_DEPLOY ] ) );
+ok( 'and keeps rollback',                    ! empty( $unnamed[ Access::CAP_ROLLBACK ] ) );
+
+echo "\n--- the list narrows, it never grants ---\n";
+//
+// Being named is necessary, not sufficient. Otherwise putting a subscriber's id in
+// wp-config.php would hand them the screen that displays the shared secret.
+$GLOBALS['dp_allowed'] = array( 42 );
+$subscriber = caps_for( array( 'read' => true ), user( 42, array( 'subscriber' ) ) );
+
+ok( 'a named NON-administrator gets nothing', empty( $subscriber[ Access::CAP_RESTRICTED ] ) );
+ok( 'and no plugin access either',            empty( $subscriber[ Access::CAP_ACCESS ] ) );
+
+echo "\n--- a list that resolves to nothing allows nobody either ---\n";
+//
+// A mistyped constant must not be a way IN. define( 'IFS_DEPLOY_ADMIN_USERS', 'admin' ) names
+// no id, and treating that as "unrestricted" would turn every typo into a silent removal of
+// the restriction. It closes, and the event log records why.
+$GLOBALS['dp_allowed'] = array( 0, 'abc', '' );
+
+ok( 'garbage allows nobody', false === Access::may_use_restricted_screens( 9 ) );
+ok( 'and the ids parse to an empty list', array() === Access::restricted_users() );
+
+remove_restricted_filter();
 
 echo "\n=== per-user OVERRIDES ===\n";
 

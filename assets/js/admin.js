@@ -1353,6 +1353,82 @@
 			} );
 		} );
 
+		/* ========================================================================
+		 * Compare & Sync — jump to a group, and reveal the rest of a long one
+		 * ======================================================================== */
+
+		// A summary card is a shortcut to its table. Only cards whose table was actually
+		// rendered are buttons, so this never has nothing to scroll to.
+		$( document ).on( 'click', '.ifs-deploy-card.is-linked', function () {
+			var target = document.getElementById( $( this ).data( 'scroll-to' ) );
+
+			if ( ! target ) {
+				return;
+			}
+
+			var reduced = window.matchMedia && window.matchMedia( '(prefers-reduced-motion: reduce)' ).matches;
+
+			target.scrollIntoView( { behavior: reduced ? 'auto' : 'smooth', block: 'start' } );
+
+			/*
+			 * Moved to as well as scrolled to. Scrolling alone leaves a keyboard or screen
+			 * reader user where they were — the page moves under them and the next Tab
+			 * carries on from the card, not from the table they just asked for.
+			 *
+			 * `tabindex="-1"` makes a non-interactive element focusable programmatically
+			 * without adding it to the tab order, and it is removed again on blur so the
+			 * heading does not become a permanent tab stop.
+			 */
+			target.setAttribute( 'tabindex', '-1' );
+			target.focus( { preventScroll: true } );
+			$( target ).one( 'blur', function () {
+				target.removeAttribute( 'tabindex' );
+			} );
+		} );
+
+		/*
+		 * "Show more" on a long group.
+		 *
+		 * The remaining rows are already in the page, inside a <template> — which the
+		 * browser parses but does not render, lay out or paint. Revealing them is a DOM
+		 * move, not a fetch: the comparison is deliberately uncached, so asking the server
+		 * for more would re-run the whole thing against Production.
+		 */
+		$( document ).on( 'click', '.ifs-deploy-show-more', function () {
+			var $btn = $( this );
+			var $group = $btn.closest( '.ifs-deploy-group' );
+			var template = $group.find( 'template.ifs-deploy-more-rows' ).get( 0 );
+			var tbody = $group.find( 'table tbody' ).get( 0 );
+
+			if ( ! template || ! tbody ) {
+				$btn.remove();
+				return;
+			}
+
+			var batch = parseInt( $btn.data( 'batch' ), 10 ) || 50;
+
+			// One fragment, one insertion — appending row by row would force the browser to
+			// re-lay out the table on every one of them.
+			var fragment = document.createDocumentFragment();
+			var moved = 0;
+
+			while ( moved < batch && template.content.firstElementChild ) {
+				fragment.appendChild( template.content.firstElementChild );
+				moved++;
+			}
+
+			tbody.appendChild( fragment );
+
+			var left = template.content.childElementCount;
+
+			if ( ! left ) {
+				$btn.closest( '.ifs-deploy-more' ).remove();
+				return;
+			}
+
+			$btn.text( IfsDeploy.i18n.showMore.replace( '%d', left ) );
+		} );
+
 		$( document ).on( 'click', '.ifs-deploy-compare-push', function () {
 			var group = $( this ).data( 'group' );
 			var ids = compareSelected( group );

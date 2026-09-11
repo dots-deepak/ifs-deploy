@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace IfsDeploy;
 
 use IfsDeploy\Admin\AdminMenu;
+use IfsDeploy\Admin\RestrictionNotice;
 use IfsDeploy\Admin\Ajax;
 use IfsDeploy\Detection\ChangeTracker;
 use IfsDeploy\Rest\RestController;
@@ -83,6 +84,10 @@ final class Plugin {
 		if ( is_admin() ) {
 			( new AdminMenu() )->register();
 			( new Ajax() )->register();
+
+			// Says why the restricted screens are missing, so their absence cannot be
+			// mistaken for the plugin being broken. Renders nothing for anyone unaffected.
+			( new RestrictionNotice() )->register();
 		}
 	}
 }

@@ -345,7 +345,9 @@ ok( 'Screen renders the panel the script targets', false !== strpos( $screen, 'i
 echo "=== tab switching contract ===\n";
 $tabs  = (string) file_get_contents( $root . '/src/Admin/Tabs.php' );
 $ajax  = (string) file_get_contents( $root . '/src/Admin/Ajax.php' );
-$menu  = (string) file_get_contents( $root . '/src/Admin/AdminMenu.php' );
+// Comments stripped: these assertions count CALLS, and the docblock explaining why the
+// menu is registered-then-removed naturally mentions add_menu_page() by name.
+$menu  = (string) php_strip_whitespace( $root . '/src/Admin/AdminMenu.php' );
 
 // The capability check that matters is the one in Tabs::render(): the AJAX endpoint
 // accepts any slug the client sends, so hiding a tab from the bar is not a control.
@@ -359,6 +361,30 @@ ok( 'AJAX tab responds with html', (bool) preg_match( '/function tab\(\).*?Tabs:
 ok( 'one admin page registered', 1 === substr_count( $menu, 'add_menu_page(' ) );
 ok( 'no submenu pages registered', false === strpos( $menu, 'add_submenu_page(' ) );
 ok( 'legacy slugs are redirected', false !== strpos( $menu, 'redirect_legacy_slugs' ) );
+
+/*
+ * ── HIDDEN ON PRODUCTION, BUT STILL REACHABLE ─────────────────────────────────────
+ *
+ * `add_menu_page()` registers the sidebar entry AND the page route. Simply not calling it
+ * would un-register the route, so `?page=ifs-deploy` would answer "Sorry, you are not
+ * allowed to access this page" — on the one site where the Plugins-screen link is the only
+ * way in. `remove_menu_page()` drops the entry and leaves the route, which is the whole
+ * trick.
+ */
+ok( 'the menu is registered, then removed', false !== strpos( $menu, 'remove_menu_page(' ) );
+ok( 'and removed LATE, after it exists', false !== strpos( $menu, chr(39) . 'maybe_hide_menu' . chr(39) . ' ), 999' ) );
+ok( 'hiding is decided by the site role', (bool) preg_match( '/maybe_hide_menu.*?Config::is_production\(\)/s', $menu ) );
+ok( 'and is filterable either way', false !== strpos( $menu, 'ifs_deploy_hide_admin_menu' ) );
+
+// The way back in. Registered with plugin_basename() rather than a hardcoded
+// `ifs-deploy/ifs-deploy.php`: the folder name is not guaranteed, and a wrong basename
+// fails silently — no error, just no link, on the site that needs it most.
+ok( 'a Plugins-screen link is added', false !== strpos( $menu, 'plugin_action_links_' ) );
+ok( 'keyed on the real basename', false !== strpos( $menu, 'plugin_basename( IFS_DEPLOY_FILE )' ) );
+ok( 'pointing at Settings', (bool) preg_match( "/action_links.*?Tabs::url\( 'settings' \)/s", $menu ) );
+
+// Not shown to somebody who would only be refused on arrival.
+ok( 'and hidden from users who cannot use it', (bool) preg_match( '/action_links.*?current_user_can\( Access::CAP_RESTRICTED \)/s', $menu ) );
 
 // Settings' inner sections must NOT use `tab`, which now selects the top-level tab.
 $settings = (string) file_get_contents( $root . '/src/Admin/Pages/SettingsPage.php' );

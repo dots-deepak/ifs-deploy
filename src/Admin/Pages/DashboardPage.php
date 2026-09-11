@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Admin\Pages;
 
-use IfsDeploy\Admin\AdminMenu;
 use IfsDeploy\Admin\Section;
 use IfsDeploy\Admin\Tabs;
 use IfsDeploy\History\DeploymentRepository;
@@ -99,7 +98,7 @@ final class DashboardPage {
 		}
 
 		// Settings is administrator-only, so do not offer a link that would 403.
-		if ( current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( current_user_can( Access::CAP_RESTRICTED ) ) {
 			$actions[] = sprintf(
 				'<a href="%1$s" class="button" data-tab="settings">%2$s</a>',
 				esc_url( Tabs::url( 'settings' ) ),
@@ -306,7 +305,7 @@ final class DashboardPage {
 
 		$message = __( 'This Staging site is not connected to a Production site yet, so nothing can be pushed.', 'ifs-deploy' );
 
-		if ( current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( current_user_can( Access::CAP_RESTRICTED ) ) {
 			printf(
 				'<div class="notice notice-warning"><p>%1$s <a href="%2$s" data-tab="settings">%3$s</a></p></div>',
 				esc_html( $message ),

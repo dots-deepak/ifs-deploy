@@ -17,7 +17,7 @@ final class Logger {
 			return;
 		}
 
-		$line = '[IFS Deploy] ' . $message;
+		$line = '[Copperleaf Deploy] ' . $message;
 		if ( $context ) {
 			$line .= ' ' . wp_json_encode( $context );
 		}

@@ -349,6 +349,93 @@ $ajax_src = src( 'src/Admin/Ajax.php' );
 ok( 'the cancel narrows silently rather than refusing', (bool) preg_match( '/function push_cancel\(.*?queue_ids\( false \)/s', $ajax_src ) );
 ok( 'while an ordinary push still refuses', (bool) preg_match( '/function queue_ids\( bool \$refuse = true \)/', $ajax_src ) );
 
+echo "\n=== Compare & Sync groups, in the order a reader needs them ===\n";
+//
+// Missing, then Production-only, then Different, then In sync: from the groups where the
+// two sites disagree about what EXISTS, through the one where they disagree about content,
+// down to the one where they agree and there is nothing to do.
+$compare_src = src( 'src/Admin/Pages/ComparePage.php' );
+
+preg_match_all( "/->objects_table\(\s*__\( '([^']+)'|->prod_only_table\(/", $compare_src, $order );
+
+$tables = array();
+foreach ( $order[0] as $k => $whole ) {
+	$tables[] = '' !== $order[1][ $k ] ? $order[1][ $k ] : 'Only on Production';
+}
+
+ok( 'four groups are rendered', 4 === count( $tables ) );
+ok( '1st is Not on Production',  'Not on Production' === ( $tables[0] ?? '' ) );
+ok( '2nd is Only on Production', 'Only on Production' === ( $tables[1] ?? '' ) );
+ok( '3rd is Different',          0 === strpos( (string) ( $tables[2] ?? '' ), 'Different' ) );
+ok( '4th is In sync',            'In sync' === ( $tables[3] ?? '' ) );
+
+/*
+ * THE CARDS MUST MATCH THE TABLES.
+ *
+ * They are links INTO those tables now, so a summary that lists groups in one order and
+ * scrolls to them in another is worse than one that does not scroll at all.
+ */
+preg_match( '/function summary\(.*?(?=function [a-z_]+\()/s', $compare_src, $summary_slice );
+
+$summary_body = (string) ( $summary_slice[0] ?? '' );
+
+$card_order = array();
+if ( preg_match_all( "/->card\(\s*__\( '([^']+)'/", $summary_body, $cards ) ) {
+	$card_order = $cards[1];
+}
+
+ok( 'the cards follow the same order', array( 'Not on Production', 'Only on Production', 'Different', 'In sync' ) === $card_order );
+
+echo "\n=== a card scrolls to its own table ===\n";
+
+ok( 'each group carries an anchor',   false !== strpos( $compare_src, 'ifs-deploy-group-' ) );
+ok( 'and the card names that anchor', false !== strpos( $compare_src, 'data-scroll-to' ) );
+
+/*
+ * A card is a BUTTON only when its table was rendered. Three of the four groups are skipped
+ * entirely when empty, so a card showing 0 would otherwise be a control that silently does
+ * nothing — which reads as broken rather than as empty.
+ */
+ok( 'an empty group gets a plain card',  false !== strpos( $compare_src, "if ( '' === \$group || ! \$has_rows ) {" ) );
+ok( 'and a populated one gets a button', false !== strpos( $compare_src, '<button type="button" class="ifs-deploy-card is-linked"' ) );
+
+// Scrolling alone leaves a keyboard user behind: the page moves and their next Tab carries
+// on from the card, not from the table they asked for.
+ok( 'the target is focused as well as scrolled to', false !== strpos( $js, 'target.focus( { preventScroll: true } )' ) );
+ok( 'and reduced motion is honoured',               false !== strpos( $js, 'prefers-reduced-motion' ) );
+
+echo "\n=== the In sync group holds its rows back ===\n";
+//
+// On a healthy site this is nearly every page, and thousands of table rows the reader never
+// looks at still cost a full layout and paint.
+ok( 'only the first rows are rendered', (bool) preg_match( '/INITIAL_ROWS = 10/', $compare_src ) );
+ok( 'and more arrive 50 at a time',     (bool) preg_match( '/REVEAL_BATCH = 50/', $compare_src ) );
+ok( 'In sync is the group limited',     (bool) preg_match( "/'in_sync',\s*self::INITIAL_ROWS/s", $compare_src ) );
+
+/*
+ * ── WHY A <template> AND NOT A FETCH, OR CSS ──────────────────────────────────────
+ *
+ * The comparison is deliberately UNCACHED, so a "show more" request would re-run the whole
+ * thing — signing another call to Production for up to 2000 posts to reveal fifty rows. And
+ * a `display:none` row is still parsed and still laid out, so hiding buys nothing.
+ *
+ * <template> content is parsed but never rendered until it is moved into the document: the
+ * rows are already here, and cost nothing until asked for.
+ */
+ok( 'the overflow sits in a template', false !== strpos( $compare_src, '<template class="ifs-deploy-more-rows">' ) );
+ok( 'revealed by moving nodes, not fetching', false !== strpos( $js, 'template.content.firstElementChild' ) );
+preg_match( "/'click', '\.ifs-deploy-show-more'.*?
+		\} \);/s", $js, $reveal_handler );
+
+$reveal_body = (string) ( $reveal_handler[0] ?? '' );
+
+ok( 'the handler was found to check',     '' !== $reveal_body );
+ok( 'no request is made to reveal them',  false === strpos( $reveal_body, '.post(' ) && false === strpos( $reveal_body, '.ajax(' ) );
+
+// One insertion, not one per row — appending individually re-lays out the table each time.
+ok( 'the batch is inserted in one go', false !== strpos( $js, 'createDocumentFragment()' ) );
+ok( 'and the button goes when nothing is left', false !== strpos( $js, "$btn.closest( '.ifs-deploy-more' ).remove()" ) );
+
 echo "\n=== Compare & Sync can push several rows at once ===\n";
 //
 // Compare is NOT the queue. Its rows are objects whose content differs from Production's,
@@ -376,10 +463,16 @@ echo "\n=== and it goes through the same batched pusher ===\n";
 ok( 'there is a plan endpoint for posts', (bool) preg_match( '/function compare_plan\(\).*?plan_posts\(/s', $ajax ) );
 ok( 'and a batch endpoint', (bool) preg_match( '/function compare_batch\(\).*?deploy_post_batch\(/s', $ajax ) );
 
-// Administrator-only, like the screen. No ownership narrowing, because Compare is not a
-// list of anyone's pending work — it is the state of the two sites.
+/*
+ * Held to the RESTRICTED-SCREEN capability, not merely to `manage_options`.
+ *
+ * Compare & Sync is one of the three screens a site can limit to named administrators, and
+ * hiding a screen means nothing if its AJAX actions stay open — `admin-ajax.php` does not
+ * care which tab you can see. No ownership narrowing on top, because Compare is not a list
+ * of anyone's pending work: it is the state of the two sites.
+ */
 foreach ( array( 'compare_plan', 'compare_batch' ) as $method ) {
-	ok( "{$method} is administrator-only", (bool) preg_match( '/function ' . $method . '\(\): void \{\s*\$this->guard\(\);/', $ajax ) );
+	ok( "{$method} needs the restricted-screen capability", (bool) preg_match( '/function ' . $method . '\(\): void \{\s*\$this->guard\( Access::CAP_RESTRICTED \);/', $ajax ) );
 	ok( "{$method} refuses to run on Production", (bool) preg_match( '/function ' . $method . '\(\).*?require_staging\(\)/s', $ajax ) );
 }
 
@@ -448,11 +541,12 @@ ok( 'credentials only go when asked', (bool) preg_match( "/CONNECTION_OPTIONS = 
 // Admin-only. Someone who may push content is not thereby someone who may erase every
 // restore point on the site.
 $ajax = src( 'src/Admin/Ajax.php' );
-ok( 'only an administrator may run it', (bool) preg_match( '/function reset_data\(\).*?guard\( Access::CAP_MANAGE \)/s', $ajax ) );
+// Reset lives on Settings, so it is held to the same capability that screen is.
+ok( 'only a permitted administrator may run it', (bool) preg_match( '/function reset_data\(\).*?guard\( Access::CAP_RESTRICTED \)/s', $ajax ) );
 
 // A reset that left no trace of itself would make the next report of "everything
 // disappeared" impossible to explain.
-ok( 'and it records that it happened', false !== strpos( $reset, 'All IFS Deploy data on this site was reset' ) );
+ok( 'and it records that it happened', false !== strpos( $reset, 'All Copperleaf Deploy data on this site was reset' ) );
 
 echo "\n=== cancelling does NOT throw the work away ===\n";
 //

@@ -77,7 +77,7 @@ final class Tabs {
 			),
 			'compare'  => array(
 				'label'      => __( 'Compare & Sync', 'ifs-deploy' ),
-				'capability' => AdminMenu::CAPABILITY,
+				'capability' => Access::CAP_RESTRICTED,
 				'class'      => ComparePage::class,
 				'lazy'       => true,
 			),
@@ -89,13 +89,13 @@ final class Tabs {
 			),
 			'settings' => array(
 				'label'      => __( 'Settings', 'ifs-deploy' ),
-				'capability' => AdminMenu::CAPABILITY,
+				'capability' => Access::CAP_RESTRICTED,
 				'class'      => SettingsPage::class,
 				'lazy'       => false,
 			),
 			'logs'     => array(
 				'label'      => __( 'Logs & Diagnostics', 'ifs-deploy' ),
-				'capability' => AdminMenu::CAPABILITY,
+				'capability' => Access::CAP_RESTRICTED,
 				'class'      => LogsPage::class,
 				'lazy'       => false,
 			),

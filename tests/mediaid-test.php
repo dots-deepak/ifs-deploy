@@ -598,7 +598,6 @@ $used = MediaReferences::find( 77, 1 );
 
 ok( 'a featured image counts', 1 === count( $used ) );
 ok( 'and it is named, not just counted', 'Home page' === ( $used[0]['label'] ?? '' ) );
-ok( 'has_any agrees', true === MediaReferences::has_any( 77 ) );
 
 $GLOBALS['db_col'] = array();
 

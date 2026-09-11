@@ -1,10 +1,10 @@
-﻿=== IFS Deploy ===
+﻿=== Copperleaf Deploy ===
 Contributors: SET_YOUR_WORDPRESS_ORG_USERNAME
 Tags: deployment, staging, content, acf, rollback
 Requires at least: 6.5
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 0.13.0
+Stable tag: 0.14.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -12,7 +12,7 @@ Push content from a Staging site to Production over a signed connection. Review 
 
 == Description ==
 
-IFS Deploy moves **content** between two WordPress sites — pages, posts, custom post
+Copperleaf Deploy moves **content** between two WordPress sites — pages, posts, custom post
 types, ACF fields, taxonomy terms, menus, allow-listed options and media. It never
 touches code, themes or plugin files, and it never writes raw SQL: everything goes
 through the WordPress APIs, so hooks and caches behave exactly as they would if a
@@ -59,7 +59,7 @@ what was done about it, and what was deliberately accepted.
 
 Install and activate on **both** sites, then:
 
-1. On the **live** site, open IFS Deploy → Settings, set the role to **Production**, and
+1. On the **live** site, open Copperleaf Deploy → Settings, set the role to **Production**, and
    copy the API key and secret it generates.
 2. On the **staging** site, set the role to **Staging** and paste the Production URL,
    API key and secret.
@@ -94,6 +94,32 @@ version is snapshotted first and can be rolled back.
 
 Yes. The signed request format is shared, so update the pair together.
 
+= Can I limit Compare & Sync, Settings and Logs to certain people? =
+
+Yes. Add this to `wp-config.php` on the site you want to restrict, listing the user IDs that
+should keep access:
+
+`define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' );`
+
+Those three screens then appear only for the users named. Every other administrator keeps
+Overview, Pending Changes and Deployment History, and can still push and roll back their own
+work — the restriction hides three screens, it does not remove anyone from the plugin.
+
+It goes in `wp-config.php` rather than a file inside the plugin because the plugin folder is
+replaced on every update, which would silently lift the restriction. Being outside the
+database also means restoring a backup cannot rewrite the list.
+
+The list only ever narrows: a user must still be an administrator *and* be named. Adding
+somebody who is not an administrator gives them nothing.
+
+If the constant is absent — or set to something with no usable IDs — every administrator
+keeps the screens, exactly as before, and a note is written to the event log. That is
+deliberate: the alternative would lock everyone out of the plugin's own Settings screen with
+no way back through wp-admin.
+
+To keep the list somewhere else, such as an mu-plugin, use the `ifs_deploy_admin_users`
+filter instead.
+
 = Is the shared secret stored in plain text? =
 
 Yes, in `wp_options`, with autoload off — the same as every plugin that holds an API
@@ -109,6 +135,45 @@ has the whole site. Rotate it from Settings → Regenerate Credentials.
 5. Logs & Diagnostics — API access on the receiving side, and the event log.
 
 == Changelog ==
+
+= 0.14.0 =
+Compare & Sync now reads in the order you need it, and the plugin can be kept out of the way
+of people who should not be changing how deployment works.
+
+* **Compare & Sync is reordered.** The groups run *Not on Production → Only on Production →
+  Different → In sync*: first the groups where the two sites disagree about what **exists**,
+  then the one where they disagree about **content**, then the one where they agree and
+  there is nothing to do. The summary cards follow the same order.
+* **The summary cards are now jump links.** Click one and the page scrolls to that group. A
+  card is only clickable when its table is actually on the page, so a card reading 0 stays a
+  plain box rather than a button that does nothing.
+* **"In sync" no longer renders thousands of rows nobody reads.** It starts at 10 and
+  **Show more** reveals 50 at a time. The rows are already in the page, so revealing them
+  makes no request and does not re-run the comparison against Production.
+* **Compare & Sync, Settings and Logs & Diagnostics are now restricted by default.** Add
+  `define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' );` to `wp-config.php` and only those user IDs
+  can reach them — everyone else is refused, including by direct URL. **Leave the constant
+  out and nobody can reach them**, on Staging or Production. Being an administrator is no
+  longer enough on its own; that is the whole point of the setting. It lives in
+  `wp-config.php` rather than in a settings screen precisely so it cannot be changed from
+  inside WordPress.
+* **The restriction explains itself rather than just hiding.** An administrator who cannot
+  reach those screens is shown the exact line to add to `wp-config.php`, with their own user
+  ID already filled in, on the plugin's screens and on the Plugins list. Nobody has to know
+  the constant's name or read the documentation to get back in. If a list already exists,
+  the suggested line **adds** them to it rather than replacing it.
+* **Being restricted is not being removed from the plugin.** Overview, Pending Changes and
+  Deployment History are unaffected, and pushing and rollback keep working exactly as
+  before — so a site that updates without adding the constant does not lose deployment.
+* **The plugin is now called Copperleaf Deploy.** This is a display change only — the
+  name in the plugin list, the sidebar menu and the screen heading. Nothing underneath
+  moved: the text domain, REST namespace, admin page slug, option keys and database tables
+  are all unchanged, so an existing paired installation keeps working across the update and
+  no reconnection is needed.
+* **The sidebar menu is hidden on Production.** The live site is not where deployments are
+  driven from, so the menu is out of the way there. Settings is still reachable through
+  **Plugins → All Plugins → Copperleaf Deploy → Settings** for anyone allowed to use it. Nothing
+  about the Staging workflow changes — an Editor still edits and pushes exactly as before.
 
 = 0.13.0 =
 New content can now arrive unpublished, so somebody on the live site decides when it goes
@@ -409,7 +474,7 @@ longer cries wolf.
 Plugin and theme archives are no longer tracked, and results are shown as toasts.
 
 * **Uploading a plugin or theme ZIP no longer creates a pending change.** Archives and
-  executables are not content, and IFS Deploy deliberately never deploys code — so a
+  executables are not content, and Copperleaf Deploy deliberately never deploys code — so a
   deploy must not be able to carry a plugin installer to the live site. Images, PDFs,
   video and audio are unaffected. A site that genuinely publishes a downloadable archive
   can allow it again with the `ifs_deploy_track_attachment` filter.
@@ -513,6 +578,15 @@ automatically on each (schema versions 6 and 7).
   API access logging with configurable retention and optional IP anonymisation.
 
 == Upgrade Notice ==
+
+= 0.14.0 =
+Reorders Compare & Sync, makes the summary cards jump to their tables, and loads the "In
+sync" list 50 rows at a time instead of all at once. IMPORTANT: Compare & Sync, Settings and
+Logs & Diagnostics are now restricted to user IDs named in a new wp-config.php constant,
+and are hidden from everyone until you add it — on both sites. Add
+define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' ); before updating, or the plugin tells you how on
+screen afterwards. Pending changes, pushing and rollback are unaffected. Also hides the
+sidebar menu on Production. No database upgrade. Update both sites together.
 
 = 0.13.0 =
 Adds a Production-side setting for the status new content arrives with, so it can wait for

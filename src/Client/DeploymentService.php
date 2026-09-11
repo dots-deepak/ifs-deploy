@@ -1225,7 +1225,7 @@ final class DeploymentService {
 
 		return sprintf(
 			/* translators: %s: underlying transport error */
-			__( '%s — Production kept processing after this site stopped waiting, so part of the batch may already be live. Check Production (and IFS Deploy → Logs there) before pushing again, and try fewer items at a time.', 'ifs-deploy' ),
+			__( '%s — Production kept processing after this site stopped waiting, so part of the batch may already be live. Check Production (and Copperleaf Deploy → Logs there) before pushing again, and try fewer items at a time.', 'ifs-deploy' ),
 			$message
 		);
 	}
@@ -1288,12 +1288,12 @@ final class DeploymentService {
 		if ( 200 !== $status ) {
 			return sprintf(
 				/* translators: 1: HTTP status code, 2: response excerpt */
-				__( 'Production returned HTTP %1$d. Response: %2$s — see IFS Deploy → Logs on both sites.', 'ifs-deploy' ),
+				__( 'Production returned HTTP %1$d. Response: %2$s — see Copperleaf Deploy → Logs on both sites.', 'ifs-deploy' ),
 				$status,
 				$raw
 			);
 		}
 
-		return __( 'Deployment failed with no detail from Production. See IFS Deploy → Logs on both sites.', 'ifs-deploy' );
+		return __( 'Deployment failed with no detail from Production. See Copperleaf Deploy → Logs on both sites.', 'ifs-deploy' );
 	}
 }

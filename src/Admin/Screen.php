@@ -35,7 +35,7 @@ final class Screen {
 		// which belongs above the tab bar rather than inside the panel — otherwise
 		// switching tabs after a save would carry the notice along with the content.
 		$notice = '';
-		if ( 'settings' === $active && current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( 'settings' === $active && current_user_can( Access::CAP_RESTRICTED ) ) {
 			$notice = SettingsPage::handle_post();
 		}
 
@@ -73,7 +73,7 @@ final class Screen {
 
 		// A text wordmark, not an image: the plugin ships no bundled artwork, so the
 		// heading costs no request and stays legible at any zoom or colour scheme.
-		echo '<span class="dp-brand-name">IFS Deploy</span>';
+		echo '<span class="dp-brand-name">Copperleaf Deploy</span>';
 
 		// Which side of the pair this is decides what every screen can do, so it is
 		// worth stating once, permanently, rather than only on the Overview tab.

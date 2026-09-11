@@ -140,13 +140,13 @@ final class Ajax {
 	 * Signed round trip to Production, reporting what it says about itself.
 	 */
 	public function diagnostics(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		wp_send_json_success( array( 'html' => ( new Diagnostics() )->run() ) );
 	}
 
 	public function clear_log(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		DebugLog::clear();
 
@@ -162,7 +162,7 @@ final class Ajax {
 	 * is looking for.
 	 */
 	public function verbose_log(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$on = isset( $_POST['on'] ) && '1' === (string) wp_unslash( $_POST['on'] );
 
@@ -192,7 +192,7 @@ final class Ajax {
 	 * purpose. This is the only way to remove an address, so it has to be deliberate.
 	 */
 	public function forget_ip(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$ip = isset( $_POST['ip'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['ip'] ) ) : '';
 
@@ -214,7 +214,7 @@ final class Ajax {
 	}
 
 	public function clear_api_log(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$removed = ApiLog::clear();
 
@@ -237,7 +237,7 @@ final class Ajax {
 	 * that makes Production refuse its own Staging site.
 	 */
 	public function mark_ip(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$ip     = isset( $_POST['ip'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['ip'] ) ) : '';
 		$action = isset( $_POST['mark'] ) ? sanitize_key( wp_unslash( (string) $_POST['mark'] ) ) : '';
@@ -296,7 +296,7 @@ final class Ajax {
 	 * email addresses.
 	 */
 	public function search_users(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$term = isset( $_POST['term'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['term'] ) ) : '';
 		if ( strlen( $term ) < 2 ) {
@@ -491,7 +491,7 @@ final class Ajax {
 	 * sites, and only an administrator can see it in the first place.
 	 */
 	public function compare_plan(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 		$this->require_staging();
 
 		$ids = $this->post_ids();
@@ -507,7 +507,7 @@ final class Ajax {
 	 * Send one batch of a planned Compare & Sync push.
 	 */
 	public function compare_batch(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 		$this->require_staging();
 
 		$uuid = isset( $_POST['uuid'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['uuid'] ) ) : '';
@@ -546,7 +546,7 @@ final class Ajax {
 	}
 
 	public function deploy_posts(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 		$this->require_staging();
 
 		$raw = isset( $_POST['post_ids'] ) ? wp_unslash( $_POST['post_ids'] ) : array();
@@ -566,7 +566,7 @@ final class Ajax {
 	}
 
 	public function sync_ids(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$result = ( new CompareService() )->sync_ids();
 
@@ -635,7 +635,7 @@ final class Ajax {
 	 * this removes exactly the records a rollback depends on.
 	 */
 	public function reset_data(): void {
-		$this->guard( Access::CAP_MANAGE );
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$include_connection = ! empty( $_POST['include_connection'] );
 
@@ -687,7 +687,7 @@ final class Ajax {
 	}
 
 	public function test_connection(): void {
-		$this->guard();
+		$this->guard( Access::CAP_RESTRICTED );
 
 		$response = ( new DeployClient() )->ping();
 

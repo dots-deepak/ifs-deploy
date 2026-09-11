@@ -2102,8 +2102,6 @@ body.ifs-deploy-modal-open {
 }
 
 
-/* ---- Tailwind utilities: LAST, so they win over components (see header) ---- */
-@tailwind utilities;
 /* --- Compare & Sync: multi-select ------------------------------------------
    The check column is narrow and top-aligned, because a Compare row's title can
    wrap to three lines and a vertically centred box then floats away from it. */
@@ -2122,3 +2120,37 @@ body.ifs-deploy-modal-open {
 .ifs-deploy .ifs-deploy-compare-count {
 	@apply tw-mt-0;
 }
+
+/* --- Compare & Sync: cards as jump links ------------------------------------
+   A linked card is a button, so the browser's default button styling has to be
+   undone before it can look like the plain cards beside it. */
+.ifs-deploy button.ifs-deploy-card {
+	font: inherit;
+	text-align: inherit;
+	cursor: pointer;
+	appearance: none;
+}
+
+.ifs-deploy .ifs-deploy-card.is-linked:hover,
+.ifs-deploy .ifs-deploy-card.is-linked:focus-visible {
+	border-color: var(--dp-accent, #2F6B4F);
+}
+
+/* The scroll target takes focus so keyboard users land where they asked to go.
+   That focus ring belongs on the heading, not drawn around the whole group. */
+.ifs-deploy .ifs-deploy-group:focus {
+	outline: none;
+}
+
+.ifs-deploy .ifs-deploy-group:focus-visible {
+	outline: 2px solid var(--dp-accent, #2F6B4F);
+	outline-offset: 4px;
+}
+
+.ifs-deploy .ifs-deploy-more {
+	margin: 12px 0 0;
+}
+
+
+/* ---- Tailwind utilities: LAST, so they win over components (see header) ---- */
+@tailwind utilities;

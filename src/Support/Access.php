@@ -39,6 +39,40 @@ final class Access {
 	/** Connection + role settings, logs, diagnostics. Administrators only. */
 	public const CAP_MANAGE = 'manage_options';
 
+	/**
+	 * Compare & Sync, Settings, and Logs & Diagnostics.
+	 *
+	 * ── WHY THESE THREE ARE SEPARATE FROM `manage_options` ─────────────────────────
+	 *
+	 * They were administrator-only, which on a site with several administrators means
+	 * everyone. Between them they expose the shared secret, the API access log, the
+	 * connection to the live site, and a screen that can overwrite Production wholesale —
+	 * so a team can reasonably want them held to named people rather than to a role.
+	 *
+	 * ── AND WHY IT NARROWS RATHER THAN GRANTS ─────────────────────────────────────
+	 *
+	 * `manage_options` is still required on top of being named. The list can only ever take
+	 * access away, never hand it out: otherwise putting a subscriber's id in `wp-config.php`
+	 * would give them the screen that displays the shared secret, which is the opposite of
+	 * what a restriction is for.
+	 */
+	public const CAP_RESTRICTED = 'ifs_deploy_restricted';
+
+	/**
+	 * Constant naming the users allowed on those screens. Comma-separated ids.
+	 *
+	 *     define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' );
+	 *
+	 * ── WHY wp-config.php AND NOT A FILE IN THE PLUGIN ────────────────────────────
+	 *
+	 * A config file inside the plugin folder is destroyed every time the plugin is
+	 * updated — the folder is replaced wholesale — so the restriction would silently lift
+	 * on each release with nothing to say it had. `wp-config.php` survives updates, and
+	 * sits outside the database, so restoring a backup or compromising an administrator
+	 * account cannot rewrite the list.
+	 */
+	public const USERS_CONSTANT = 'IFS_DEPLOY_ADMIN_USERS';
+
 	private const OPTION = 'ifs_deploy_roles';
 
 	private const OPTION_USERS = 'ifs_deploy_users';
@@ -60,7 +94,7 @@ final class Access {
 	public static function grantable(): array {
 		return array(
 			self::CAP_ACCESS   => array(
-				'label'       => __( 'Access IFS Deploy', 'ifs-deploy' ),
+				'label'       => __( 'Access Copperleaf Deploy', 'ifs-deploy' ),
 				'description' => __( 'See the Dashboard, their own pending changes, and their own deployment history.', 'ifs-deploy' ),
 			),
 			self::CAP_VIEW_ALL => array(
@@ -109,6 +143,19 @@ final class Access {
 			foreach ( array_keys( self::grantable() ) as $cap ) {
 				$allcaps[ $cap ] = true;
 			}
+
+			/*
+			 * The three restricted screens are the ONE thing an administrator does not get
+			 * automatically — that is the entire point of them.
+			 *
+			 * Granted on top of `manage_options`, never instead of it, so the list can only
+			 * narrow. `$user` can be absent here (WordPress passes it, but the filter's
+			 * contract does not guarantee an object), which is why the id is read defensively
+			 * rather than assumed.
+			 */
+			$allcaps[ self::CAP_RESTRICTED ] = self::may_use_restricted_screens(
+				$user instanceof WP_User ? (int) $user->ID : 0
+			);
 
 			return $allcaps;
 		}
@@ -347,6 +394,86 @@ final class Access {
 		$object = is_object( $roles ) ? $roles->get_role( $role ) : null;
 
 		return ( null !== $object && ! empty( $object->capabilities[ self::CAP_MANAGE ] ) );
+	}
+
+	/**
+	 * Is this user allowed on Compare & Sync, Settings and Logs & Diagnostics?
+	 *
+	 * Only ever called for somebody who already holds `manage_options`, so a `true` here
+	 * widens nothing — it decides whether an administrator keeps access they would
+	 * otherwise have had.
+	 *
+	 * ── NO LIST MEANS NOBODY ───────────────────────────────────────────────────────
+	 *
+	 * Deny by default. An administrator reaches these screens only by being named in
+	 * `wp-config.php`; an undefined, empty or unparseable constant lets nobody in.
+	 *
+	 * The opposite default — "not set" meaning "everyone" — is the more forgiving one and
+	 * was what this shipped with first. It is wrong for what these screens do. They hold
+	 * the connection credentials, the API log and the button that pushes to the live site,
+	 * and a restriction that has to be switched ON is a restriction that is OFF on every
+	 * site where someone forgot, lost the line in a wp-config rewrite, or restored an older
+	 * copy of the file. Failing open there means failing open silently, at exactly the
+	 * moment the protection was supposed to apply.
+	 *
+	 * ── AND WHY THAT IS NOT A LOCKOUT ──────────────────────────────────────────────
+	 *
+	 * Settings is one of the screens being hidden, so nobody can grant themselves access
+	 * from inside wp-admin — by design, and the reason the list lives in a file the
+	 * database cannot reach. The way back in is always the same one line in
+	 * `wp-config.php`, and `Admin\RestrictionNotice` prints it, with the reader's own user
+	 * id already filled in, on the screens they can still reach. A hidden tab with no
+	 * explanation would be indistinguishable from a broken plugin; this one explains
+	 * itself.
+	 */
+	public static function may_use_restricted_screens( int $user_id ): bool {
+		$allowed = self::restricted_users();
+
+		if ( empty( $allowed ) ) {
+			return false;
+		}
+
+		return $user_id > 0 && in_array( $user_id, $allowed, true );
+	}
+
+	/**
+	 * The user ids named in `wp-config.php`, or an empty list when unset.
+	 *
+	 * @return int[]
+	 */
+	public static function restricted_users(): array {
+		$raw = defined( self::USERS_CONSTANT ) ? constant( self::USERS_CONSTANT ) : '';
+
+		// Accepts a comma-separated string — the documented form — or an array, because
+		// somebody will eventually write one and being strict about it helps nobody.
+		$parts = is_array( $raw ) ? $raw : explode( ',', (string) $raw );
+
+		$ids = array_values( array_unique( array_filter( array_map( 'absint', $parts ) ) ) );
+
+		/**
+		 * Filter the users allowed on the restricted screens.
+		 *
+		 * The escape hatch for moving the list out of `wp-config.php` — into an mu-plugin,
+		 * say — without editing this plugin. Returning an empty array allows NOBODY onto
+		 * the restricted screens, the same as leaving the constant undefined.
+		 *
+		 * @param int[] $ids Ids parsed from the constant.
+		 */
+		$ids = (array) apply_filters( 'ifs_deploy_admin_users', $ids );
+
+		$ids = array_values( array_unique( array_filter( array_map( 'absint', $ids ) ) ) );
+
+		if ( empty( $ids ) && defined( self::USERS_CONSTANT ) && '' !== (string) constant( self::USERS_CONSTANT ) ) {
+			DebugLog::warning(
+				'IFS_DEPLOY_ADMIN_USERS is set but names no usable user ids, so nobody can reach Compare & Sync, Settings or Logs & Diagnostics',
+				array(
+					'value' => (string) constant( self::USERS_CONSTANT ),
+					'fix'   => 'Use numeric user ids separated by commas, e.g. 1,7',
+				)
+			);
+		}
+
+		return $ids;
 	}
 
 	/**

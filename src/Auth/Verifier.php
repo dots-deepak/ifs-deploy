@@ -88,7 +88,7 @@ final class Verifier {
 			'The paired site is still signing requests the old way, so the route is not bound into its signatures.',
 			array(
 				'route' => $route,
-				'fix'   => 'Update IFS Deploy on the Staging site. Requests upgrade themselves on the first successful call after that; nothing needs configuring.',
+				'fix'   => 'Update Copperleaf Deploy on the Staging site. Requests upgrade themselves on the first successful call after that; nothing needs configuring.',
 			)
 		);
 	}

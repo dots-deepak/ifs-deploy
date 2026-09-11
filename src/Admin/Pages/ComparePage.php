@@ -3,11 +3,11 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Admin\Pages;
 
-use IfsDeploy\Admin\AdminMenu;
 use IfsDeploy\Admin\PreviewModal;
 use IfsDeploy\Admin\Section;
 use IfsDeploy\Admin\Tabs;
 use IfsDeploy\Client\CompareService;
+use IfsDeploy\Support\Access;
 use IfsDeploy\Support\Config;
 
 /**
@@ -16,8 +16,20 @@ use IfsDeploy\Support\Config;
  */
 final class ComparePage {
 
+	/**
+	 * How many "In sync" rows are rendered into the page.
+	 *
+	 * The rest are held in a `<template>` — present, but not laid out — so a site with two
+	 * thousand matching pages does not pay to render a list nobody reads.
+	 */
+	private const INITIAL_ROWS = 10;
+
+	/** How many more each press of "Show more" brings in. */
+	private const REVEAL_BATCH = 50;
+
+
 	public function render(): void {
-		if ( ! current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( ! current_user_can( Access::CAP_RESTRICTED ) ) {
 			return;
 		}
 
@@ -67,9 +79,33 @@ final class ComparePage {
 		$missing   = $this->filter_status( $rows, CompareService::STATUS_MISSING );
 		$in_sync   = $this->filter_status( $rows, CompareService::STATUS_IN_SYNC );
 
-		$this->summary( (array) $comparison['summary'] );
+		$prod_only = (array) $comparison['prod_only'];
 
-		// Most important first: pages that differ and can be pushed.
+		$this->summary( (array) $comparison['summary'], $different, $missing, $in_sync, $prod_only );
+
+		/*
+		 * ── THE ORDER IS "WHAT NEEDS A DECISION", NOT "WHAT MATTERS MOST" ──────────────
+		 *
+		 * Missing first, then Production-only, then Different, then In sync. It runs from
+		 * the groups where the two sites genuinely disagree about what EXISTS, through the
+		 * ones where they disagree about content, down to the ones where they agree and
+		 * there is nothing to do.
+		 *
+		 * The card order matches exactly, because the cards are now links INTO these
+		 * tables — a summary that lists things in one order and scrolls to them in another
+		 * is worse than one that does not scroll at all.
+		 */
+		$this->objects_table(
+			__( 'Not on Production', 'ifs-deploy' ),
+			__( 'These exist on Staging but not yet on Production.', 'ifs-deploy' ),
+			$missing,
+			true,
+			'',
+			'missing'
+		);
+
+		$this->prod_only_table( $prod_only );
+
 		$this->objects_table(
 			__( 'Different — needs deploy', 'ifs-deploy' ),
 			__( 'These pages/posts differ from Production. Push to make Production match Staging.', 'ifs-deploy' ),
@@ -79,30 +115,19 @@ final class ComparePage {
 			'different'
 		);
 
-		if ( $missing ) {
-			$this->objects_table(
-				__( 'Not on Production', 'ifs-deploy' ),
-				__( 'These exist on Staging but not yet on Production.', 'ifs-deploy' ),
-				$missing,
-				true,
-				'',
-				'missing'
-			);
-		}
-
-		if ( $in_sync ) {
-			$this->objects_table(
-				__( 'In sync', 'ifs-deploy' ),
-				__( 'These match Production.', 'ifs-deploy' ),
-				$in_sync,
-				false,
-				''
-			);
-		}
-
-		$this->prod_only_table( (array) $comparison['prod_only'] );
-
-
+		/*
+		 * In sync is the biggest group on a healthy site and the least interesting, so only
+		 * the first rows are rendered into the page — see `objects_table()`'s $reveal_after.
+		 */
+		$this->objects_table(
+			__( 'In sync', 'ifs-deploy' ),
+			__( 'These match Production.', 'ifs-deploy' ),
+			$in_sync,
+			false,
+			'',
+			'in_sync',
+			self::INITIAL_ROWS
+		);
 	}
 
 	/**
@@ -117,12 +142,20 @@ final class ComparePage {
 		);
 	}
 
-	private function summary( array $summary ): void {
+	/**
+	 * The four counts, in the same order as the tables they scroll to.
+	 *
+	 * Each card is given the rows of its own group so it can tell whether there is
+	 * anything to scroll TO. Three of the four tables are skipped entirely when empty, so a
+	 * card showing 0 would otherwise be a button that silently does nothing — which reads
+	 * as a broken feature rather than as an empty group.
+	 */
+	private function summary( array $summary, array $different, array $missing, array $in_sync, array $prod_only ): void {
 		echo '<div class="ifs-deploy-cards">';
-		$this->card( __( 'In sync', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_IN_SYNC ] ?? 0 ) );
-		$this->card( __( 'Different', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_DIFFERENT ] ?? 0 ) );
-		$this->card( __( 'Not on Production', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_MISSING ] ?? 0 ) );
-		$this->card( __( 'Only on Production', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_PROD_ONLY ] ?? 0 ) );
+		$this->card( __( 'Not on Production', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_MISSING ] ?? 0 ), 'missing', ! empty( $missing ) );
+		$this->card( __( 'Only on Production', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_PROD_ONLY ] ?? 0 ), 'prod_only', ! empty( $prod_only ) );
+		$this->card( __( 'Different', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_DIFFERENT ] ?? 0 ), 'different', true );
+		$this->card( __( 'In sync', 'ifs-deploy' ), (string) ( $summary[ CompareService::STATUS_IN_SYNC ] ?? 0 ), 'in_sync', ! empty( $in_sync ) );
 		echo '</div>';
 	}
 
@@ -133,7 +166,15 @@ final class ComparePage {
 	 * @param bool   $with_action   Whether to render the push action column.
 	 * @param string $empty_message Message when the group is empty ('' = skip).
 	 */
-	private function objects_table( string $heading, string $description, array $rows, bool $with_action, string $empty_message, string $group = '' ): void {
+	/**
+	 * @param int $reveal_after Render only this many rows and hold the rest back behind a
+	 *                          "Show more" button. 0 renders every row.
+	 */
+	private function objects_table( string $heading, string $description, array $rows, bool $with_action, string $empty_message, string $group = '', int $reveal_after = 0 ): void {
+		// The anchor the summary card scrolls to. Wraps the whole group — heading,
+		// description and table — so the jump lands on the title rather than on a row.
+		printf( '<div class="ifs-deploy-group" id="%s">', esc_attr( 'ifs-deploy-group-' . $group ) );
+
 		Section::heading(
 			$heading,
 			'<span class="ifs-deploy-count">' . (int) count( $rows ) . '</span>'
@@ -147,6 +188,9 @@ final class ComparePage {
 			if ( '' !== $empty_message ) {
 				echo '<p>' . esc_html( $empty_message ) . '</p>';
 			}
+
+			echo '</div>';
+
 			return;
 		}
 
@@ -188,7 +232,42 @@ final class ComparePage {
 		}
 		echo '</tr></thead><tbody>';
 
+		/*
+		 * ── WHY A <template> RATHER THAN HIDDEN ROWS OR AN AJAX CALL ──────────────────
+		 *
+		 * On a healthy site "In sync" is nearly every page, and on a large one that is
+		 * thousands of table rows the reader almost never looks at. They still cost the
+		 * browser a full layout and paint.
+		 *
+		 * Fetching the rest on demand is not an option: the comparison is deliberately
+		 * UNCACHED — `CompareService` bypasses caches so the screen shows live truth — so a
+		 * "show more" request would re-run the whole comparison, signing another call to
+		 * Production for up to 2000 posts to reveal fifty rows.
+		 *
+		 * Hiding them with CSS would not help either; a `display:none` row is still parsed
+		 * and still built.
+		 *
+		 * `<template>` is the one that actually does what is wanted: the browser parses the
+		 * markup but does not render, lay out or paint it until something moves it into the
+		 * document. So the rows are already here — no second request — and cost nothing
+		 * until asked for. It also keeps ONE rendering path: the rows are built by the same
+		 * PHP loop either way, rather than duplicated as markup-building JavaScript that
+		 * would drift from it.
+		 *
+		 * What this does NOT do is make the page arrive faster. The HTML is the same size
+		 * and the request to Production is unchanged; what disappears is the layout cost.
+		 */
+		$held_back = $reveal_after > 0 && count( $rows ) > $reveal_after;
+		$rendered  = 0;
+
 		foreach ( $rows as $row ) {
+			if ( $held_back && $rendered === $reveal_after ) {
+				echo '</tbody></table>';
+				echo '<template class="ifs-deploy-more-rows">';
+			}
+
+			++$rendered;
+
 			$check = $with_action
 				? sprintf(
 					'<th scope="row" class="check-column"><input type="checkbox" class="ifs-deploy-compare-item" data-group="%1$s" value="%2$d" /></th>',
@@ -227,7 +306,29 @@ final class ComparePage {
 			echo '<tr>' . $cells . '</tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built from escaped parts above.
 		}
 
-		echo '</tbody></table>';
+		if ( $held_back ) {
+			// The template closes here; the table it belongs to was closed before it opened.
+			echo '</template>';
+
+			$remaining = count( $rows ) - $reveal_after;
+
+			printf(
+				'<p class="ifs-deploy-more"><button type="button" class="button ifs-deploy-show-more" data-batch="%1$d">%2$s</button></p>',
+				self::REVEAL_BATCH,
+				esc_html(
+					sprintf(
+						/* translators: 1: how many rows are still hidden, 2: how many the button reveals */
+						_n( 'Show more (%1$d hidden)', 'Show more (%1$d hidden)', $remaining, 'ifs-deploy' ),
+						$remaining,
+						self::REVEAL_BATCH
+					)
+				)
+			);
+		} else {
+			echo '</tbody></table>';
+		}
+
+		echo '</div>';
 	}
 
 	private function prod_only_table( array $prod_only ): void {
@@ -235,8 +336,14 @@ final class ComparePage {
 			return;
 		}
 
-		Section::heading( __( 'Only on Production', 'ifs-deploy' ) );
-		echo '<p class="dp-help">' . esc_html__( 'These exist on Production but have no match on Staging. IFS Deploy never deletes content automatically.', 'ifs-deploy' ) . '</p>';
+		// Wrapped like the other groups so its summary card has somewhere to scroll to.
+		echo '<div class="ifs-deploy-group" id="ifs-deploy-group-prod_only">';
+
+		Section::heading(
+			__( 'Only on Production', 'ifs-deploy' ),
+			'<span class="ifs-deploy-count">' . (int) count( $prod_only ) . '</span>'
+		);
+		echo '<p class="dp-help">' . esc_html__( 'These exist on Production but have no match on Staging. Copperleaf Deploy never deletes content automatically.', 'ifs-deploy' ) . '</p>';
 		echo '<table class="wp-list-table widefat fixed striped">';
 		echo '<thead><tr>';
 		echo '<th>' . esc_html__( 'Object', 'ifs-deploy' ) . '</th>';
@@ -254,6 +361,8 @@ final class ComparePage {
 		}
 
 		echo '</tbody></table>';
+
+		echo '</div>';
 	}
 
 	private function match_label( string $type ): string {
@@ -285,11 +394,35 @@ final class ComparePage {
 		);
 	}
 
-	private function card( string $label, string $value ): void {
+	/**
+	 * One summary figure, which doubles as a jump link to its table.
+	 *
+	 * A BUTTON rather than an anchor: this scrolls within the page rather than navigating,
+	 * and the panel is swapped in by the tab loader, so a `#hash` would survive in the URL
+	 * long after the section it names had gone. A button also gets keyboard and
+	 * screen-reader behaviour for free, which the plain `<div>` these used to be did not.
+	 *
+	 * @param bool $has_rows Whether the table this points at was rendered at all.
+	 */
+	private function card( string $label, string $value, string $group = '', bool $has_rows = true ): void {
+		if ( '' === $group || ! $has_rows ) {
+			printf(
+				'<div class="ifs-deploy-card"><span class="ifs-deploy-card-label">%1$s</span><span class="ifs-deploy-card-value">%2$s</span></div>',
+				esc_html( $label ),
+				esc_html( $value )
+			);
+
+			return;
+		}
+
 		printf(
-			'<div class="ifs-deploy-card"><span class="ifs-deploy-card-label">%1$s</span><span class="ifs-deploy-card-value">%2$s</span></div>',
+			'<button type="button" class="ifs-deploy-card is-linked" data-scroll-to="%3$s">'
+				. '<span class="ifs-deploy-card-label">%1$s</span>'
+				. '<span class="ifs-deploy-card-value">%2$s</span>'
+				. '</button>',
 			esc_html( $label ),
-			esc_html( $value )
+			esc_html( $value ),
+			esc_attr( 'ifs-deploy-group-' . $group )
 		);
 	}
 }

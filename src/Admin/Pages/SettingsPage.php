@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Admin\Pages;
 
-use IfsDeploy\Admin\AdminMenu;
 use IfsDeploy\Admin\Section;
 use IfsDeploy\Admin\Tabs;
 use IfsDeploy\Auth\Credentials;
@@ -44,7 +43,7 @@ final class SettingsPage {
 	private const CONNECTION_FORM_ID = 'dp-connection-form';
 
 	public function render(): void {
-		if ( ! current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( ! current_user_can( Access::CAP_RESTRICTED ) ) {
 			return;
 		}
 
@@ -868,7 +867,7 @@ final class SettingsPage {
 
 		Section::heading( __( 'By role', 'ifs-deploy' ) );
 
-		echo '<p class="dp-help">' . esc_html__( 'Nothing is granted by default — a role sees IFS Deploy only once you allow it here.', 'ifs-deploy' ) . '</p>';
+		echo '<p class="dp-help">' . esc_html__( 'Nothing is granted by default — a role sees Copperleaf Deploy only once you allow it here.', 'ifs-deploy' ) . '</p>';
 
 		echo '<div class="dp-table-wrap">';
 		echo '<table class="dp-table ifs-deploy-roles">';
@@ -967,7 +966,7 @@ final class SettingsPage {
 		echo '<span class="dp-field-label">' . esc_html__( 'Block', 'ifs-deploy' ) . '</span>';
 		echo '<div class="dp-field-control">';
 		$this->user_picker( 'dp_users_block', $users['block'], __( 'Search users to block…', 'ifs-deploy' ) );
-		echo '<p class="dp-help">' . esc_html__( 'These users get no IFS Deploy access at all, even if their role allows it. Blocking wins over everything else — except administrators, who always keep full access.', 'ifs-deploy' ) . '</p>';
+		echo '<p class="dp-help">' . esc_html__( 'These users get no Copperleaf Deploy access at all, even if their role allows it. Blocking wins over everything else — except administrators, who always keep full access.', 'ifs-deploy' ) . '</p>';
 		echo '</div></div>';
 	}
 
@@ -1141,7 +1140,7 @@ final class SettingsPage {
 				'API credentials were regenerated on this site. Any Staging site still holding the old keys will be refused until it is updated.',
 				array(
 					'by'   => (string) wp_get_current_user()->user_login,
-					'next' => 'Copy the new API key and secret into the Staging site under IFS Deploy → Settings → Connection Settings.',
+					'next' => 'Copy the new API key and secret into the Staging site under Copperleaf Deploy → Settings → Connection Settings.',
 				)
 			);
 

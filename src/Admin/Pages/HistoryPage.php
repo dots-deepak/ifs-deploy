@@ -43,7 +43,7 @@ final class HistoryPage {
 				esc_html__( 'Clear History', 'ifs-deploy' )
 			);
 		}
-		echo '<span class="description">' . esc_html__( 'IFS Deploy keeps the latest 3 restore points per page/post, so older deployments of the same object may no longer be rollback-able.', 'ifs-deploy' ) . '</span>';
+		echo '<span class="description">' . esc_html__( 'Copperleaf Deploy keeps the latest 3 restore points per page/post, so older deployments of the same object may no longer be rollback-able.', 'ifs-deploy' ) . '</span>';
 		echo '</p>';
 
 		echo '<table class="wp-list-table widefat fixed striped">';

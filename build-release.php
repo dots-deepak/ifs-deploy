@@ -107,7 +107,7 @@ foreach (
 preg_match( '/^ \* Author:\s*(.+)$/m', $header, $m );
 $author = trim( $m[1] ?? '' );
 
-if ( '' === $author || false !== stripos( 'IFS Deploy', $author ) ) {
+if ( '' === $author || false !== stripos( 'Copperleaf Deploy', $author ) ) {
 	$warnings[] = "the `Author` header still says \"{$author}\" — it should name a person or company";
 }
 

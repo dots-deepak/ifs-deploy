@@ -36,13 +36,6 @@ namespace IfsDeploy\Support;
 final class MediaReferences {
 
 	/**
-	 * Is this attachment referenced anywhere this class knows how to look?
-	 */
-	public static function has_any( int $attachment_id ): bool {
-		return array() !== self::find( $attachment_id, 1 );
-	}
-
-	/**
 	 * Everything referring to this attachment.
 	 *
 	 * @param int $attachment_id The attachment to look for.

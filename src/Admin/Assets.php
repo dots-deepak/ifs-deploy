@@ -89,6 +89,8 @@ final class Assets {
 					'pushComplete'          => __( 'Finished. Refreshing the list…', 'ifs-deploy' ),
 					/* translators: 1: how many rows are ticked, 2: how many there are */
 					'compareSelected'       => __( '%1$d of %2$d selected', 'ifs-deploy' ),
+					/* translators: %d: how many rows are still hidden */
+					'showMore'              => __( 'Show more (%d hidden)', 'ifs-deploy' ),
 					/* translators: %d: how many objects will be overwritten on Production */
 					'compareConfirmOverwrite' => __( '%d objects will be pushed, replacing whatever Production currently has for them. This list is everything that DIFFERS — which can include pages edited directly on Production. Those edits will be overwritten.', 'ifs-deploy' ),
 					/* translators: %d: how many objects will be created on Production */

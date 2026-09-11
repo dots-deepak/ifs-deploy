@@ -170,7 +170,7 @@ final class DataReset {
 		 * report of "everything disappeared" impossible to explain.
 		 */
 		DebugLog::info(
-			'All IFS Deploy data on this site was reset',
+			'All Copperleaf Deploy data on this site was reset',
 			array_merge(
 				$counts,
 				array(

@@ -135,7 +135,7 @@ final class Diagnostics {
 			$is_prod,
 			$is_prod
 				? __( 'Correct — it will accept deployments.', 'ifs-deploy' )
-				: __( 'It is set to Staging, so it refuses every deployment with HTTP 409. Change its role under IFS Deploy → Settings on that site.', 'ifs-deploy' )
+				: __( 'It is set to Staging, so it refuses every deployment with HTTP 409. Change its role under Copperleaf Deploy → Settings on that site.', 'ifs-deploy' )
 		);
 
 		// Feature classes.

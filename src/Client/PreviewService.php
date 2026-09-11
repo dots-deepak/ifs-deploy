@@ -249,7 +249,7 @@ final class PreviewService {
 
 			if ( '' === $error ) {
 				/* translators: %d: HTTP status code */
-				$error = sprintf( __( 'Production returned HTTP %d. Check IFS Deploy → Settings.', 'ifs-deploy' ), (int) $response['status'] );
+				$error = sprintf( __( 'Production returned HTTP %d. Check Copperleaf Deploy → Settings.', 'ifs-deploy' ), (int) $response['status'] );
 			}
 
 			return array( 'error' => $error );

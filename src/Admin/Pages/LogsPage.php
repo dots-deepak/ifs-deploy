@@ -3,13 +3,13 @@ declare(strict_types=1);
 
 namespace IfsDeploy\Admin\Pages;
 
-use IfsDeploy\Admin\AdminMenu;
 use IfsDeploy\Admin\Section;
 use IfsDeploy\Admin\Tabs;
 use IfsDeploy\Auth\Credentials;
 use IfsDeploy\History\DeploymentRepository;
 use IfsDeploy\Support\ApiLog;
 use IfsDeploy\Support\ClientIp;
+use IfsDeploy\Support\Access;
 use IfsDeploy\Support\Config;
 use IfsDeploy\Support\DebugLog;
 use IfsDeploy\Support\IpAccess;
@@ -35,7 +35,7 @@ final class LogsPage {
 	private const SCAN_LIMIT = 20;
 
 	public function render(): void {
-		if ( ! current_user_can( AdminMenu::CAPABILITY ) ) {
+		if ( ! current_user_can( Access::CAP_RESTRICTED ) ) {
 			return;
 		}
 
@@ -78,7 +78,7 @@ final class LogsPage {
 				__( 'Production credentials', 'ifs-deploy' ),
 				( '' !== $remote['api_key'] && '' !== $remote['secret_key'] )
 					? __( 'Set', 'ifs-deploy' )
-					: __( 'Missing — set them under IFS Deploy → Settings', 'ifs-deploy' ),
+					: __( 'Missing — set them under Copperleaf Deploy → Settings', 'ifs-deploy' ),
 				'' === $remote['api_key'] || '' === $remote['secret_key']
 			);
 		}

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace IfsDeploy\Admin;
 
 use IfsDeploy\Support\Access;
+use IfsDeploy\Support\Config;
 
 /**
  * Registers the IFS Deploy admin menu and its single screen, plus admin assets.
@@ -28,6 +29,23 @@ final class AdminMenu {
 
 	public function register(): void {
 		add_action( 'admin_menu', array( $this, 'add_menu' ) );
+
+		/*
+		 * Late, and DELIBERATELY NOT "just skip add_menu_page()".
+		 *
+		 * `add_menu_page()` does two jobs: it adds the sidebar entry AND registers the page
+		 * route. Skipping it would un-register the route, so `?page=ifs-deploy` would answer
+		 * "Sorry, you are not allowed to access this page" and the plugin would be
+		 * unreachable on the very site it is configured from.
+		 *
+		 * `remove_menu_page()` takes the entry out of the menu and leaves the route behind,
+		 * which is exactly the split wanted: hidden, but still there for anyone with the URL
+		 * or the link on the Plugins screen.
+		 */
+		add_action( 'admin_menu', array( $this, 'maybe_hide_menu' ), 999 );
+
+		// The way in once the sidebar entry is gone.
+		add_filter( 'plugin_action_links_' . plugin_basename( IFS_DEPLOY_FILE ), array( $this, 'action_links' ) );
 
 		// NOT `admin_init` — that fires too late to help here. wp-admin/admin.php loads
 		// wp-admin/menu.php (which runs the access check and calls wp_die) BEFORE it
@@ -112,8 +130,8 @@ final class AdminMenu {
 		// up the admin colour scheme and its hover/current states with no CSS of ours,
 		// and it costs no extra request on the admin pages that all load Dashicons anyway.
 		add_menu_page(
-			__( 'IFS Deploy', 'ifs-deploy' ),
-			__( 'IFS Deploy', 'ifs-deploy' ),
+			__( 'Copperleaf Deploy', 'ifs-deploy' ),
+			__( 'Copperleaf Deploy', 'ifs-deploy' ),
 			Access::CAP_ACCESS,
 			self::SLUG,
 			array( new Screen(), 'render' ),
@@ -121,4 +139,71 @@ final class AdminMenu {
 			81
 		);
 	}
+	/**
+	 * Take the sidebar entry away on Production, leaving the screen reachable.
+	 *
+	 * ── WHY PRODUCTION ─────────────────────────────────────────────────────────────
+	 *
+	 * Nothing on a receiving site is day-to-day work. Pending Changes, Compare & Sync and
+	 * Deployment History are Staging-only by definition, so what remains there is
+	 * configuration — something an administrator visits when setting the pair up, not a
+	 * menu item the whole team needs to walk past every day.
+	 *
+	 * ── WHAT IT COSTS, STATED PLAINLY ──────────────────────────────────────────────
+	 *
+	 * It makes the plugin administrator-only on Production in practice. Somebody with
+	 * plugin access but not `activate_plugins` can no longer reach Overview there, because
+	 * the Plugins screen is the only remaining route and they cannot see it. Editing and
+	 * pushing from Staging are untouched — that workflow never goes through this menu.
+	 */
+	public function maybe_hide_menu(): void {
+		/**
+		 * Filter whether the sidebar entry is hidden on this site.
+		 *
+		 * Production by default. Returning false keeps the menu on a Production site;
+		 * returning true hides it on Staging too.
+		 *
+		 * @param bool $hide
+		 */
+		if ( ! apply_filters( 'ifs_deploy_hide_admin_menu', Config::is_production() ) ) {
+			return;
+		}
+
+		remove_menu_page( self::SLUG );
+	}
+
+	/**
+	 * "Settings" under the plugin name on Plugins → Installed Plugins.
+	 *
+	 * Shown on BOTH sites. On Production it is the only way in; on Staging it is an
+	 * ordinary shortcut, and a link that exists on one site but not the other is more
+	 * confusing than one that is always there.
+	 *
+	 * Hidden from anybody who cannot use the screen, so a restricted administrator is not
+	 * offered a link that lands on "You do not have permission to view this section" —
+	 * see Access::CAP_RESTRICTED.
+	 *
+	 * @param array<int|string,string> $links
+	 *
+	 * @return array<int|string,string>
+	 */
+	public function action_links( $links ) {
+		if ( ! is_array( $links ) || ! current_user_can( Access::CAP_RESTRICTED ) ) {
+			return $links;
+		}
+
+		// Prepended: WordPress puts Deactivate first by convention, and a plugin's own
+		// links read better before it than after.
+		array_unshift(
+			$links,
+			sprintf(
+				'<a href="%1$s">%2$s</a>',
+				esc_url( Tabs::url( 'settings' ) ),
+				esc_html__( 'Settings', 'ifs-deploy' )
+			)
+		);
+
+		return $links;
+	}
+
 }

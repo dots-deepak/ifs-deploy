@@ -652,6 +652,23 @@
 					return;
 				}
 
+				/*
+				 * A PLAN OF NOTHING IS NOT A PUSH.
+				 *
+				 * pushNext() finishes as soon as it finds no batches left, so starting a
+				 * push with an empty plan ran straight to "Pushed 0 items to Production."
+				 * and reloaded — which reads as a successful deploy of whatever is still
+				 * on screen. Reported from a live site as Success with nothing arriving.
+				 *
+				 * The server says WHY it is empty: rows that were selected and are no
+				 * longer pending come back with a message naming them. Anything else is
+				 * an empty selection, which the buttons already guard.
+				 */
+				if ( ! res.data.total ) {
+					notify( res.data.message || IfsDeploy.i18n.nothingPending, true );
+					return;
+				}
+
 				push = {
 					uuid: res.data.uuid,
 					batches: res.data.batches,

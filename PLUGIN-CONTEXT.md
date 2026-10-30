@@ -1,14 +1,20 @@
-# IFS Deploy — Complete Context & Handoff
+# Copperleaf Deploy — Complete Context & Handoff
 
 > Purpose of this file: give a fresh chat/developer the *full* context of what
-> IFS Deploy is, how it's built, every decision made so far, what works, and
+> Copperleaf Deploy is, how it's built, every decision made so far, what works, and
 > what's deferred — so work can continue without re-reading the whole history.
 
 ---
 
 ## 1. What it is
 
-IFS Deploy is a WordPress plugin that deploys **content** (not database dumps)
+> **Two names, and the difference matters.** The plugin is **displayed** as
+> **Copperleaf Deploy**. Everything underneath still spells `ifs-deploy` / `ifs_deploy_` /
+> `IfsDeploy` — folder, text domain, REST namespace, option keys, tables, namespace,
+> constants. That split is deliberate (§25). This document uses the display name for the
+> product and the internal spelling for identifiers, and so should you.
+
+Copperleaf Deploy is a WordPress plugin that deploys **content** (not database dumps)
 from a **Staging** site to a **Production** site over a secure, signed REST
 connection. Think "git push, but for WordPress content."
 
@@ -30,8 +36,9 @@ production) is a runtime setting, not a separate build.
 - Repo / working dir: **`d:\Projects\Wordpress\IFS [22020]\ifs-deploy`** — the only folder
   that matters. The old `deploypress` checkout is abandoned; nothing here depends on it.
   The **release zip writes `ifs-deploy/` as the internal folder** regardless of what the
-  checkout is called (§29), which is what WordPress takes the slug from. Git branch:
-  `ifs-deploy` (main branch: `main`).
+  checkout is called (§29), which is what WordPress takes the slug from — and it stays
+  `ifs-deploy` even though the plugin now *displays* as Copperleaf Deploy (§25). Git branch:
+  feature branches off `main`; the client handles all git themselves.
 - The path contains `[22020]`, which **`glob()` reads as a character class** and silently
   matches nothing. Every tool and test in this repo uses `scandir()` instead. Tailwind's own
   content scanner is unaffected because its patterns are relative.
@@ -65,13 +72,14 @@ which is why Diagnostics checks Production for each expected class by name (§20
   `composer.json` declares the same PSR-4 map for tooling, but **no
   `composer install` is required on the server** and there is no `vendor/`.
 - WordPress coding-style-ish (tabs, `esc_*`, nonces, capability checks).
-- **86 classes in `src/`**, all lint-clean.
-- **34 test suites + 6 repo-wide checks, 1653 assertions**, runnable without WordPress. See §24.
+- **95 classes in `src/`**, all lint-clean.
+- **37 test suites + 6 repo-wide checks, 2219 assertions**, runnable without WordPress. See §24.
 
 ### Naming — one plugin, six spellings
 
-Renamed twice: display name `Stagio → IFS Deploy`, then internals `deploypress → ifs_deploy_`
-(2799 references, 126 files). One spelling cannot serve every context, so:
+Renamed three times: display `Stagio → IFS Deploy`, then internals `deploypress → ifs_deploy_`
+(2799 references, 126 files), then display again `IFS Deploy → Copperleaf Deploy` (§25). Only the
+MIDDLE one moved an identifier. One spelling cannot serve every context, so:
 
 | Context | Form | Why not just `ifs-deploy` |
 |---|---|---|
@@ -80,7 +88,7 @@ Renamed twice: display name `Stagio → IFS Deploy`, then internals `deploypress
 | Options, tables, post meta, hooks, filters, nonces | `ifs_deploy_` | `wp_ajax_ifs-deploy_x` matches no hook; a hyphen in an unquoted SQL identifier is a syntax error |
 | Text domain, REST namespace, page slug, CSS classes | `ifs-deploy` | slugs are hyphenated |
 | HTTP headers | `X-IFS-Deploy-` | header casing |
-| Prose, labels | `IFS Deploy` | it is a name |
+| Prose, labels | `Copperleaf Deploy` | it is a name — and it changed without anything beneath it moving (§25) |
 
 The `dp-` CSS prefix and `dp_` transient prefix are **deliberately unchanged** — opaque
 prefixes nobody reads as a brand.
@@ -91,14 +99,20 @@ signature URL token baked into every hash on disk, and the "option was absent" s
 into snapshots. Its docblock has a table of exactly what breaks if each one changes.
 `Support\LegacyRename` migrates a pre-rename install (tables, options, post + term meta, **and
 the capability names stored inside two option values**) — see §29.
-- **Admin CSS is now BUILT** with the Tailwind v3 standalone binary (no Node). Edit
+- **Admin CSS is BUILT** with Tailwind v3 (no Node toolchain). Edit
   `assets/css/src/admin.src.css`, never `assets/css/admin.css`. See `DESIGN.md`.
+  **The binary is no longer in the repo** — it was 38 MB, roughly twenty times everything
+  else combined, and never shipped. Use the standalone exe from outside the checkout, or
+  `npx tailwindcss@3.4.19 -c tailwind.config.js -i assets/css/src/admin.src.css -o
+  assets/css/admin.css --minify`, which is how 0.14.0 was built. It prints *"No utility
+  classes were detected"* — **expected**, because every utility here is applied through
+  `@apply`, which does not go through the content scanner.
 
 ---
 
 ## 3. How to set it up (admin flow)
 
-Install + activate on both sites, then **IFS Deploy → Settings → Connection
+Install + activate on both sites, then **Copperleaf Deploy → Settings → Connection
 Settings**:
 
 - **Production site:** Role = Production. Leave the remote fields blank. Copy
@@ -111,11 +125,16 @@ fields (JS toggle + server-side initial state), since Production needs no remote
 details.
 
 Admin menu: **Dashboard, Pending Changes, Compare & Sync, Deployment History,
-Settings, Logs & Diagnostics.**
+Settings, Logs & Diagnostics** — one page with client-side tabs, not six pages (phase 23).
+
+**Three of those are restricted** (Compare & Sync, Settings, Logs & Diagnostics) and are
+hidden from everyone until user ids are named in `IFS_DEPLOY_ADMIN_USERS` in `wp-config.php`
+— see §21 before concluding the plugin is broken. **On Production the sidebar entry is hidden
+altogether** (§35); Settings is reached through Plugins → All Plugins.
 
 ("Connection Settings" was renamed to **Settings** once it grew a second tab — see
 §21. Messages that used to point users at "Connection Settings" now say
-"IFS Deploy → Settings".)
+"Copperleaf Deploy → Settings".)
 
 ---
 
@@ -217,7 +236,7 @@ A redirect now surfaces as `ifs_deploy_redirected` with the fix (correct the Pro
 
 ---
 
-## 6. Database (5 tables, `Support\Schema` via dbDelta)
+## 6. Database (6 tables, `Support\Schema` via dbDelta)
 
 - `wp_ifs_deploy_queue` — pending changes. Columns: id, object_type,
   object_subtype, object_id, object_title, action, object_hash,
@@ -233,23 +252,36 @@ A redirect now surfaces as `ifs_deploy_redirected` with the fix (correct the Pro
   forwarded, route, method, outcome, status, user_agent, is_new_ip, created_at. §20.
 - `wp_ifs_deploy_nonces` — the replay store. `nonce_hash char(64)` with a **UNIQUE** key (the
   index *is* the check) plus `expires_at` for the sweep. §5.
+- `wp_ifs_deploy_api_addresses` — the roster of callers, kept **apart from** `api_log` (DB v8)
+  so it survives Clear and log retention. Without the split, a healthy pair needed a log row
+  per accepted request simply to keep the roster complete.
 
 `Schema::maybe_upgrade()` runs on `plugins_loaded` gated by `ifs_deploy_db_version`
-(constant `IFS_DEPLOY_DB_VERSION`, **now `6`**). Schema history: **1** initial tables ·
+(constant `IFS_DEPLOY_DB_VERSION`, **now `10`**). Schema history: **1** initial tables ·
 **2** queue `user_id` · **3** queue `deployed_hash` plus a `Schema::migrate()` backfill ·
 **4** `api_log` · **5** `nonces` · **6** no schema change — re-keys existing option queue
 rows after `OptionExporter::option_id()` stopped using crc32 (§26) · **7** queue
 `baseline_hash`, plus collapsing duplicate rows now that a row's identity is
-(object_type, object_id) rather than including the subtype (§26b).
+(object_type, object_id) rather than including the subtype (§26b) · **8** the
+`api_addresses` table, so the roster of callers survives Clear and retention · **9** no
+schema change — removes pending rows the current rules would never have created
+(`user_id = 0`, plugin/theme archives) · **10** queue `action_label`, the human verb shown
+in the Action column, and a re-run of the v9 sweep because `on_trash()` had not been
+applying the rule that created it (§30).
+
+The authoritative history is the `Schema` class docblock, which is **six tables now**, not
+five: `queue`, `deployments`, `revisions`, `api_log`, `api_addresses`, `nonces`.
 
 **Options** (the authoritative list is `uninstall.php`, and `contracts-test.php` fails if any
 option the code writes is missing from it): `db_version, role, credentials, remote, debug_log,
 roles, users, log_retention_days, trusted_ip_header, anonymise_ips, ip_allow, ip_block,
-content_firewall, peer_protocol, log_duplicates, legacy_migrated` — all `ifs_deploy_`-prefixed,
-all removed on uninstall.
+content_firewall, peer_protocol, log_duplicates, legacy_migrated, new_status, purge_logs,
+verbose_log` — all `ifs_deploy_`-prefixed, all removed on uninstall. **Read that list from
+`uninstall.php`, not from here**; this copy has gone stale before.
 
 **Post/term meta** written on the receiver: `_ifs_deploy_origin_id`, `_origin_site`,
-`_origin_term_id`, `_source_url`, `_src_sig`. `origin_id` is how Production recognises an object
+`_origin_term_id`, `_source_url`, `_src_sig`, `_src_status` (the last status Staging reported,
+which is how §32 tells a deliberate status change from an incidental one). `origin_id` is how Production recognises an object
 as the copy of a Staging one — lose it and the next deploy creates a duplicate instead of
 updating (§9).
 
@@ -514,7 +546,7 @@ can produce a false "in sync."
 
 ## 17. File map (src/)
 
-86 classes. Newer additions marked ★.
+95 classes. Newer additions marked ★.
 
 ```
 Plugin.php                     bootstrap; wires services by role
@@ -536,13 +568,17 @@ Support/  Activator, Schema, Config, Logger, ContentSignature, SiteIndex,
         ★ LogRetention    the daily purge + retention setting (§20)
         ★ Legacy          the six strings that keep the pre-rename spelling (§2)
         ★ LegacyRename    one-time data migration for a pre-rename install (§29)
+        ★ PublishPolicy   the status NEW content arrives at on Production (§32)
+        ★ MediaReferences is this attachment referenced anywhere? (§31)
+        ★ DataReset       return this site to a pre-install state, content untouched (§34)
 Auth/     Credentials, Signer, Verifier,
         ★ Protocol        which signing version the peer speaks; one-way ratchet (§5)
         ★ NonceStore      atomic replay claim, fails open (§5)
         ★ Lockout         cool-off after repeated auth failures (§5)
 Detection/ChangeTracker, PostObserver, TermObserver, OptionObserver,
           AttachmentObserver, MenuObserver
-Queue/    QueueRepository, Hasher
+Queue/    QueueRepository, Hasher,
+        ★ MediaLifecycle  the verb an operator performed, for the Action column (§30)
 Export/   PostExporter, TermExporter, OptionExporter, MediaExporter, MenuExporter
 Import/   ImportManager (dispatch + type ordering), PostImporter, TermImporter,
           OptionImporter, MediaImporter, MenuImporter,
@@ -552,16 +588,22 @@ Rollback/ SnapshotStore,
 History/  DeploymentRepository
 Rest/     RestController, PingEndpoint, ImportEndpoint, RollbackEndpoint,
           IndexEndpoint, LinkEndpoint,
+        ★ CancelEndpoint          revert what a cancelled push already sent (§33)
+        ★ IdSpaceEndpoint         what attachment ids Production has free (§31)
         ★ ObjectEndpoint          read-only, deploy preview (§19)
         ★ RollbackPreviewEndpoint read-only, rollback diff (§22)
         ★ SignatureEndpoint       read-only, queue verification (§23)
 Client/   DeployClient (signed HTTP), DeploymentService, CompareService,
+        ★ PushCancellation  owns the cancel sequence; local write first (§33)
+        ★ MediaIdResolver   inspect / renumber an attachment id (§31)
         ★ DeployLock      per-object locks so two people cannot push one object at once
         ★ PreviewService          deploy preview (§19)
         ★ RollbackPreviewService  rollback preview (§22)
         ★ QueueVerifier           drops already-in-sync rows (§23)
 Admin/    AdminMenu, Assets, Ajax,
+          Screen, Tabs, Section   the one-page tab shell (phase 23, DESIGN.md)
           Pages/{Dashboard,PendingChanges,Compare,History,Settings}Page,
+        ★ RestrictionNotice  says WHY a restricted screen is missing (§35)
         ★ Pages/LogsPage     logs + diagnostics screen (§20)
         ★ Diagnostics        the health-check report (§20)
         ★ DiffRenderer       renders PackageDiff output (§19)
@@ -573,8 +615,8 @@ Root: `ifs-deploy.php`, `uninstall.php`, `composer.json`, `readme.txt`,
 `SPRINT-PLAN.txt`, this file, and **`tests/`** (§24 — dev tooling, exclude from
 builds).
 
-REST namespace: `ifs-deploy/v1`. Endpoints: `ping, import, rollback, index,
-link, object, rollback-preview, signatures`. The last three are read-only: `object`
+REST namespace: `ifs-deploy/v1`. Endpoints: `ping, import, rollback, cancel, index,
+link, object, id-space, rollback-preview, signatures`. The last three are read-only: `object`
 powers the deploy preview diff (§19), `rollback-preview` the rollback diff (§22), and
 `signatures` the Pending Changes verification (§23). `ping` also reports Production's
 diagnostics (§20).
@@ -605,7 +647,7 @@ diagnostics (§20).
 - ~~`readme.txt` is stale~~ — **done**, rewritten for release with Installation, FAQ and a
   Changelog; every claim checked against the code.
 - **Plugin name for wordpress.org** — decided for this build, still open for the public
-  directory (§25, §30).
+  directory (§25, §37).
 - **A per-API-key rate limit** — declined with the numbers written down, because one API key is
   shared by the whole team; see `SECURITY.md` §12.
 - **Multi-contributor queue ownership** — the queue is one row per object owned by the last
@@ -759,7 +801,7 @@ or previews fail on both screens.
 
 ## 20. Logs & Diagnostics (debugging a failed deploy)
 
-Admin screen **IFS Deploy → Logs & Diagnostics**, present on both sites.
+Admin screen **Copperleaf Deploy → Logs & Diagnostics**, present on both sites.
 
 Why it exists: a failed push reported only "Deployment failed." even though the
 cause was usually already known. Three separate things hid it:
@@ -833,7 +875,7 @@ caps onto WordPress's role objects mutates global state that outlives deactivati
 is shared with every other plugin, and can strand a site. A filter is evaluated per
 request and vanishes with the plugin.
 
-Grantable: `ifs_deploy_access` (see IFS Deploy, own changes only),
+Grantable: `ifs_deploy_access` (see Copperleaf Deploy, own changes only),
 `ifs_deploy_view_all` (see everyone's), `ifs_deploy_deploy`,
 `ifs_deploy_rollback`. `CAP_MANAGE` is `manage_options` and is **not** grantable, so
 a delegated role can never widen its own permissions.
@@ -843,10 +885,14 @@ Invariants, all covered by `access-test.php` (20 cases):
 - **Defaults grant nothing.** Only administrators have access out of the box, which
   reproduces the old `manage_options` gate exactly — nobody gains visibility on
   upgrade.
-- **Administrators can never be locked out.** Anyone with `manage_options` is granted
-  every capability regardless of the option, so the screen that hands out
-  permissions cannot be used to lose it. The administrator row is shown ticked and
-  disabled, and `save()` refuses to store it.
+- **Administrators can never be locked out *by this screen*.** Anyone with
+  `manage_options` is granted every **grantable** capability regardless of the option, so
+  the screen that hands out permissions cannot be used to lose it. The administrator row is
+  shown ticked and disabled, and `save()` refuses to store it.
+
+  **This no longer means an administrator sees everything.** `CAP_RESTRICTED` is granted on
+  top of `manage_options` and is explicitly NOT part of `grantable()` — see the subsection
+  below before relying on the old reading of this invariant.
 - **`access` is a prerequisite.** A role given only "deploy" gets nothing — otherwise
   a half-configured role could act without being able to see what it was acting on.
 - `grant()` must never call `current_user_can()`; that re-enters the same filter and
@@ -889,7 +935,50 @@ posting its id. `Ajax::guard()` **defaults to `manage_options`**, so an action a
 without thinking about permissions fails closed.
 
 Compare & Sync stays administrator-only: it works on posts rather than queue rows,
-so there is no ownership to scope it by.
+so there is no ownership to scope it by. It is also one of the three **restricted** screens
+below, so administrator is necessary and no longer sufficient.
+
+### The three restricted screens (`CAP_RESTRICTED`, `IFS_DEPLOY_ADMIN_USERS`)
+
+**Compare & Sync, Settings and Logs & Diagnostics are deny-by-default.** Between them they
+expose the shared secret, the API access log and a control that overwrites Production
+wholesale — and "administrator-only" on a site with a dozen administrators means everyone.
+
+    define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' );   // in wp-config.php
+
+- **`Access::CAP_RESTRICTED`** (`ifs_deploy_restricted`) is granted **on top of**
+  `manage_options`, never instead of it, so the list can only ever narrow. It is deliberately
+  absent from `grantable()`: a delegated role must not be able to hand it out.
+- **No list means NOBODY**, not everybody — including a constant that is defined but parses
+  to no usable ids. The opposite default was what shipped first and was wrong: a restriction
+  that has to be switched ON is OFF wherever the line was forgotten, lost in a wp-config
+  rewrite, or restored from an older copy of the file — failing open at precisely the moment
+  it was meant to apply.
+- **It lives in `wp-config.php`, not in a setting.** A setting would be editable from the
+  very screen it protects, and a file inside the plugin folder is destroyed on every update.
+- **`ifs_deploy_admin_users`** is the filter, for moving the list into an mu-plugin.
+  Returning an empty array allows nobody — it does not restore the old open behaviour.
+
+**Why this is not a lockout.** Settings is itself one of the hidden screens, so nobody can
+grant themselves access from inside wp-admin. `Admin\RestrictionNotice` (§35) is what keeps
+that from being a dead end: it prints the exact line to paste, with the reader's own user id
+already in it, on the screens they can still reach.
+
+**What it does NOT do.** It is not a security boundary against a determined administrator —
+anyone who can edit `wp-config.php`, install a plugin or run code on the server undoes it.
+It keeps deployment settings out of the way of colleagues who should not be changing them.
+
+**Being restricted is not being removed from the plugin.** Overview, Pending Changes,
+Deployment History, pushing and rollback are all unaffected, which is what stops a site that
+updates without the constant from losing deployment altogether.
+
+Covered by `access-test.php` (the capability half) and `render-test.php` (the notice).
+
+### Rollback is owned, not merely permitted
+
+`Access::may_act_on( int $owner_id )` adds the same ownership rule pushing already had: only
+the person who made a deployment — or an administrator — can roll it back. `CAP_ROLLBACK`
+alone is not enough to undo somebody else's push.
 
 Settings is now tabbed (`&tab=connection|roles`), both administrator-only. While
 rewriting its save handler, a long-standing bug went with it: it used to call
@@ -942,7 +1031,7 @@ Two subtleties that make the comparison honest:
   `PackageDiff` expects. Snapshots are written for *restoring*, not comparing: meta is
   raw `get_post_meta()` (serialized), taxonomies are term IDs, the thumbnail is an
   attachment ID. It unserializes, resolves IDs to slugs/filenames, and filters through
-  `Support\MetaBlocklist` (§23) so IFS Deploy's own bookkeeping and other volatile
+  `Support\MetaBlocklist` (§23) so Copperleaf Deploy's own bookkeeping and other volatile
   keys are not reported as changes. Empty taxonomies are preserved deliberately —
   `restore_post()` iterates the snapshot's taxonomies, so one recorded as empty really
   does get cleared, and dropping the key would mislabel that as "kept".
@@ -1018,7 +1107,7 @@ Rows deployed before the column existed are backfilled by `Schema::migrate()`
 existing history rather than only after each object's next deploy. `upsert()` reads the
 column with `?? ''` so it is safe even if a row predates it.
 
-Objects never deployed by IFS Deploy keep an empty `deployed_hash` and behave as
+Objects never deployed by Copperleaf Deploy keep an empty `deployed_hash` and behave as
 before — Staging cannot know Production's state for them without asking, which is what
 Compare & Sync and the preview dialog are for.
 
@@ -1104,7 +1193,7 @@ sites now pass `wp_slash()`: `PostImporter::apply_meta()`,
 `SnapshotStore`. For values without backslashes `wp_slash()` is a no-op, so this cannot
 change well-behaved data.
 
-### Rollback preserves IFS Deploy's own stamps
+### Rollback preserves Copperleaf Deploy's own stamps
 
 `SnapshotStore::replace_meta()` used to delete ALL meta and write the snapshot's back.
 The first deploy of a page snapshots it *before* the origin link is written, so rolling
@@ -1117,7 +1206,7 @@ describe the deployment relationship, not the content.
 
 ## 24. Test suites
 
-Live in **`tests/`**. **34 suites + 6 repo-wide checks, 1653 assertions, all passing.** Plain
+Live in **`tests/`**. **37 suites + 6 repo-wide checks, 2219 assertions, all passing.** Plain
 PHP — no WordPress, no PHPUnit, no `composer install`; each suite stubs the handful of WordPress
 functions it touches.
 
@@ -1218,6 +1307,10 @@ not need the same pass.
   stubbed by subclassing. Where a decision needed testing it was extracted into a pure
   `public static` method (e.g. `QueueVerifier::should_clear()`).
 
+**The per-suite case counts in the table above are a snapshot and drift constantly.** Run
+`php tests/run-all.php` for the real numbers; treat the table as "what each suite is for",
+not as a count anyone should trust.
+
 **Gap worth knowing:** these are unit-level. Nothing exercises a real signed round-trip between
 two WordPress installs, media downloads, or the admin screens end to end — those have only been
 tested by hand on the live pair.
@@ -1225,8 +1318,8 @@ tested by hand on the live pair.
 ---
 ## 25. Plugin name — decided for this build, open for wordpress.org
 
-**This build ships as `IFS Deploy` / `ifs-deploy`.** The public-directory name is still open; the
-research that led here:
+**This build is displayed as `Copperleaf Deploy` and ships as `ifs-deploy`.** The public-directory
+name is still open; the research that led here:
 
 - The slug `ifs-deploy` is free, but the name reads as *code* deployment
   (WP Pusher / DeployHQ territory) when this plugin deliberately does not touch code.
@@ -1242,13 +1335,14 @@ Verified free at the time of checking: `stagio`, `portro`, `publo`, `shifto`,
 
 | | |
 |---|---|
-| **This build** | **IFS Deploy** — the display name, for the IFS Copperleaf project. Shipped. |
+| **This build** | **Copperleaf Deploy** — the display name, for the IFS Copperleaf project. Shipped in 0.14.0. |
 | **wordpress.org** | **Still open.** `stagio` and `portro` were the front-runners and were free when checked. |
 
-They are separate decisions on purpose. **IFS Deploy is not a candidate for the public
-directory**: `IFS` is the trading name of a large ERP vendor (ifs.com), and guideline 17 is
-about exactly that — leading with a brand you do not own. Fine for a build that only ever runs
-on the client's own two sites; a rejection risk on submission.
+They are separate decisions on purpose. **Neither name is a candidate for the public
+directory**: `IFS` is the trading name of a large ERP vendor (ifs.com), and `Copperleaf` is the
+client's own brand. Guideline 17 is about exactly that — leading with a brand you do not own.
+Fine for a build that only ever runs on the client's own two sites; a rejection risk on
+submission.
 
 ### What the rename touched
 
@@ -1273,6 +1367,21 @@ because one spelling cannot serve every context:
 The `dp-` CSS prefix and the `dp_` transient prefix were **left alone**: they are opaque
 three-letter prefixes nobody reads as a brand, and renaming them would touch several hundred
 call sites across PHP, CSS and JS for no visible gain.
+
+**Pass 3 — display only, again (0.14.0): `IFS Deploy` → `Copperleaf Deploy`.** Plugin header,
+sidebar label, screen wordmark, `readme.txt`, and every user-facing string that pointed
+somebody at the menu ("see IFS Deploy → Logs"). **Zero identifiers moved**, verified by a
+sweep of the built zip that found no user-facing string carrying the old name and confirmed
+the text domain, REST namespace, slug, option keys and tables unchanged. No migration, and an
+existing pair keeps working across the update with no reconnection.
+
+Docblocks, comments and the internal context files deliberately still say "IFS Deploy": they
+describe the *codebase*, whose internal name has not changed, and none of them ship to a user.
+
+`tests/render-test.php` pins both halves of this split — the display name in four places, and
+the five identifiers that must never follow it. That section exists because the codebase has
+now been renamed three times, and the next person tempted to "finish the job" would break a
+live paired installation.
 
 ### The part that is not a find-and-replace
 
@@ -1626,6 +1735,23 @@ What happened after that, and why:
     (§2). The second needed `Support\LegacyRename` (§29).
 32. **Release prep** — dead-code sweep, `contracts-test.php`, `readme.txt` rewrite,
     `build-release.php` + `.distignore` (§29).
+33. **Media correctness, reported from the live pair** — trash intent travelling instead of
+    being re-derived (§30), the ID-conflict refusal (§31), plugin ZIPs never tracked, and
+    add-then-delete cancelling out. This was the longest-running thread in the project and
+    every item came from the client using it, not from a test.
+34. **Batched pushes, and the three cancel bugs** (§33). Also fixed Deployment History never
+    being recorded for batched pushes — `deploy_batch()` never called `deployments->create()`,
+    which had silently disabled **Rollback for every push made from Pending Changes**.
+35. **Line endings pinned to LF** (`.gitattributes`). `core.autocrlf=true` gave CRLF
+    checkouts, and tests matching `\n\t\t}` against raw source passed or failed depending on
+    how a file had last been saved. Normalising 61 files then exposed a genuinely dead
+    `use WP_Error;` the checker had been missing all along.
+36. **The Tailwind binary left the repo** — 38 MB, roughly twenty times everything else
+    combined, and never shipped (§2).
+37. **Deny-by-default for the three restricted screens** (§21, §35), reversing the fail-open
+    default this first shipped with, plus the notice that keeps it from being a dead end.
+38. **Display rename to Copperleaf Deploy** (§25), and this document brought back into line
+    with the code.
 
 ### Corrections worth carrying forward
 
@@ -1644,6 +1770,15 @@ Recorded because they change how much of the older analysis to trust:
 - **A signature-token impact was overstated.** Renaming it was described as breaking ~2000
   objects; tracing `SyncCheck::in_sync()` showed the fresh-recompute branch still matches. The
   token is still frozen, but for the snapshot sentinel's sake, not that reason.
+- **"Fixed" was claimed three times for cancel mid-push before it was** (§33). Each cause was
+  real and each fix was correct; none of them was the whole bug. The lesson is specific: on
+  anything with a race in it, a passing unit test is evidence about logic and says nothing
+  about timing — only the live pair could settle it, and it did, three times.
+- **The restricted screens shipped failing OPEN.** An undefined constant meant "everyone",
+  which reads as safe until you notice that the restriction is then absent on every site where
+  the line was forgotten or lost. Reversed in 0.14.0 (§21). Defaults for a protective feature
+  should be chosen by asking what happens when the configuration is missing, not by which
+  direction is more forgiving.
 
 ---
 
@@ -1711,36 +1846,254 @@ the only way the last 13 old-name strings go away.
 
 ---
 
-## 30. How to continue in a new chat
+## 30. Media lifecycle: saying what actually happened
 
-Point the session at this file and the plugin dir. State of play: **1545 assertions green**,
-`SECURITY.md` has nothing outstanding, **§26 is fully closed**.
+Three related reports, one root shape: the queue recorded *what the deploy would do*
+(`update` / `delete`) and showed that to the operator, who had done something with a name —
+trashed, restored, published.
 
-Suggested order:
+- **`Queue\MediaLifecycle`** holds the verbs (`ADDED, UPDATED, RESTORED, PUBLISHED,
+  DRAFTED, SCHEDULED, PRIVATED, TRASHED, DELETED`) and the rule for when two of them
+  **cancel out**. `action` still drives the deploy; `action_label` (DB v10) rides alongside
+  it and is only ever displayed.
+- **Add-then-delete leaves no row.** Queueing a creation and then a removal before pushing
+  is a net no-op, so `cancels_out()` drops the row rather than deploying a delete for an
+  object Production never received.
+- **Trash intent travels.** `MEDIA_TRASH` defaults to **false** in WordPress core
+  (`wp-includes/default-constants.php`), so letting the receiver decide meant "trash this on
+  Staging" **destroyed the file on Production**. The intent is now carried in the package and
+  honoured, instead of being re-derived from the receiving site's constants.
+- **Trashed items stay findable.** `WP_Query`'s `'any'` post_status **excludes `trash`** — it
+  is built by excluding statuses flagged `exclude_from_search` — so the matcher could not find
+  an object it had just trashed, and emptying the Trash afterwards synced nothing.
+- **Plugin/theme ZIPs are never tracked.** The guard existed but was applied by *callers*, and
+  `on_trash()` was not one of them. It moved into `queue_removal()`, where every path reaches
+  it. Archives and executables are not content, and a deploy must not be able to carry a
+  plugin installer to the live site.
 
-1. **End-to-end smoke test on the live pair.** The suites are unit-level — nothing exercises a
-   real signed round-trip, media download, or the admin screens end to end. Do this before
-   anything else, especially the migration (§29). It matters more than usual now: §26 touched
-   the import matcher, the media path and the schema, and none of that has run against real
-   WordPress yet.
-2. **Re-run the Tailwind build.** `assets/css/admin.css` is STALE relative to
-   `assets/css/src/admin.src.css` in this checkout — the source declares a card shadow and the
-   whole `.ifs-deploy .dp-env-card.is-self` rule, and neither is in the built file (`is-self`
-   appears zero times). That is the silent no-op DESIGN.md warns about, and mtime does not
-   catch it because both files carry their checkout time. Two assertions in `render-test.php`
-   are commented out waiting on it, with the exact lines to restore.
-3. **Rotate the two WP Engine passwords** — still live in git history (§1).
-4. **Set `Author`, `Plugin URI`, `Contributors`, `Tested up to`.** The build warns about the
-   first three.
-5. **Delete the legacy migration** once §29 has run on both sites.
-6. Extend Compare & Sync and the preview to terms / options / media / menus.
+---
+
+## 31. Media ID sync (`Client\MediaIdResolver`, `Support\MediaReferences`)
+
+§9's ID parity is best-effort by design: `import_id` is honoured only when the id is free, and
+WordPress silently assigns a new one otherwise. For posts that is survivable. For media it is
+not — raw ACF image fields and `wp-image-N` classes are copied verbatim, so a reassigned
+attachment id points at an unrelated image, or at nothing.
+
+The fix is to **refuse rather than diverge**. Before a push, ids are validated against
+Production (**`/id-space`**); a conflict blocks the push and names what is occupying the id,
+instead of succeeding and leaving the two sites quietly unsynchronised.
+
+Where the id can be *moved*, the plugin offers to: **`MediaIdResolver::inspect()` /
+`renumber()`** does a direct SQL id move inside a transaction — but **only when the attachment
+has zero references anywhere**. That is what `Support\MediaReferences` decides, and it is
+deliberately over-broad: featured images, `wp-image-N`, `"id":123` in block JSON, gallery
+shortcodes, postmeta at any depth, `site_icon` / `custom_logo`, theme mods and term
+relationships. `has_meta_reference()` matches the number anywhere in a value
+(`/(?<![0-9])123(?![0-9])/`) so serialised ACF galleries and comma-separated id lists are
+caught.
+
+**The asymmetry is the whole design.** A false "in use" costs a refusal, which is recoverable
+and visible. A false "unused" corrupts the live site quietly. Every check errs toward finding
+a reference.
+
+Media that already matches is left alone — the feature exists to stop *new* divergence, not to
+renumber a working library.
+
+---
+
+## 32. Default status for new content (`Support\PublishPolicy`)
+
+A Production-side setting (`ifs_deploy_new_status`) deciding the status content arrives at the
+**first** time it is pushed, so somebody on the live site chooses when it goes public.
+
+- **New objects only.** An object that already exists on Production keeps the status it has.
+  Pushing an edit neither republishes nor unpublishes it — a page deliberately published on the
+  live site stays published, however many content edits follow.
+- **Unless the status was deliberately changed on Staging.** That is a content change like any
+  other and applies normally. The two cases are told apart by `respects_source_status()`, which
+  compares against **the last status Staging recorded** (`_ifs_deploy_src_status`), *not*
+  against Production's current status — once the setting is in use the two sites are meant to
+  differ, so comparing them would read every push as a deliberate change.
+- **The setting lives on Production**, because the live site decides its own publishing. A
+  policy set on Staging would be the sending site choosing when the receiver publishes. Staging
+  shows a note saying where to find it.
+- **Falls back to `draft`, never to the incoming status.** `NEVER` excludes `auto-draft`,
+  `inherit`, `trash` and `future`. If the chosen status cannot be used for a post type, the
+  answer is Draft — the point of the feature is that nothing publishes itself.
+- Deliberately **not cleared by Reset All Plugin Data** (§34): it is a policy decision about the
+  site, not deployment state.
+
+---
+
+## 33. Cancelling a push (`Client\PushCancellation`, `/cancel`)
+
+Reported broken three times, with **three genuinely different causes**. Worth recording in
+full, because each fix looked complete and the next report proved it was not:
+
+1. **A race.** An in-flight batch's `apply_results()` ran *after* the cancel had restored the
+   rows, marking them deployed again.
+2. **Ordering.** The `/cancel` HTTP call happened *before* the local CANCELLED flag was
+   written, leaving a multi-second window in which a batch completing read "not cancelled" and
+   went live.
+3. **The timeout branch.** It returned without re-cancelling **and** overwrote CANCELLED with
+   FAILED.
+
+The shape of the fix:
+
+- **`PushCancellation::run()` writes the local CANCELLED flag FIRST**, before any network call.
+  A local DB write cannot be outrun by a round trip.
+- **Cancellation is checked before the `is_wp_error()` branch** in `DeploymentService`, so a
+  timeout cannot be mistaken for a failure that overwrites the cancel.
+- **CANCELLED is final at the repository.** `update()` and `set_status()` refuse to write over
+  it, so no later arrival can undo the decision.
+- **The sweep repeats until two consecutive passes revert nothing** (`MAX_SWEEPS = 4`,
+  `CLEAN_PASSES = 2`, `PAUSE_SECONDS = 2`) — one clean pass only proves nothing was in flight
+  *at that instant*.
+- A 5-minute transient stops `QueueVerifier` (§23) clearing the rows it has just restored.
+
+The contract: **a cancel leaves nothing deployed and keeps every row in Pending Changes.**
+Throwing away queued work is the worse failure of the two.
+
+---
+
+## 34. Reset All Plugin Data (`Support\DataReset`)
+
+Settings → Log Retention. Truncates queue, deployments, revisions, api_log, api_addresses and
+nonces; deletes the deployment stamps from post and term meta (`_ifs_deploy_origin_id`,
+`_origin_site`, `_source_url`, `_src_sig`, `_src_status`).
+
+**It never touches content.** No page, post, image or site setting is altered — only this
+plugin's own bookkeeping. Run it on both sites for a clean pair.
+
+Two deliberate exclusions: `ifs_deploy_new_status` (§32), a site policy rather than state; and
+connection settings, which are removed only on the explicit variant that says so, since
+clearing them unpairs the sites and needs regenerated credentials on both.
+
+Irreversible in the way that matters: the restore points a rollback would need are part of what
+it removes, which is why the confirmation says so in those words.
+
+---
+
+## 35. Restricted screens and the Production menu
+
+The capability half is §21. Two pieces of surface sit on top of it:
+
+### `Admin\RestrictionNotice` — why a dead end is not a dead end
+
+Deny-by-default hides Settings, so access cannot be restored from inside wp-admin. Without an
+explanation, tabs that existed yesterday are simply gone — **indistinguishable from a broken
+plugin**. The notice prints the exact `define()` line with the reader's own user id already in
+it.
+
+- It distinguishes **"nobody is configured"** from **"you specifically are not on the list"**.
+  The second is where somebody stares at a line that looks correct.
+- When a list already exists the suggested line **adds** the reader to it. Printing only their
+  own id would be an instruction to lock out everyone currently listed.
+- Shown only to `manage_options` holders who lack `CAP_RESTRICTED` — an administrator actually
+  affected. An Editor never sees it: those screens were never theirs, so the notice would
+  explain the wrong reason, and it would hand a `wp-config.php` recipe to someone with no
+  business editing that file.
+- On the plugin's screens **and the Plugins list** — not site-wide. A permanent banner on every
+  admin page for a correctly configured setting is its own bug. The Plugins list is required
+  because on Production the sidebar entry is hidden, making it the only page an affected
+  administrator reliably passes through.
+
+### Hiding the menu on Production
+
+`AdminMenu::maybe_hide_menu()` on `admin_menu` at priority **999**, calling
+`remove_menu_page()`.
+
+**Deliberately NOT "skip `add_menu_page()`".** That call does two jobs — it adds the sidebar
+entry *and registers the page route*. Skipping it un-registers the route, so `?page=ifs-deploy`
+answers "Sorry, you are not allowed to access this page" and the plugin becomes unreachable on
+the very site it is configured from. `remove_menu_page()` takes the entry out and leaves the
+route, which is exactly the split wanted.
+
+Filterable via `ifs_deploy_hide_admin_menu`. The way back in is a Settings link added to
+Plugins → All Plugins, keyed on `plugin_basename( IFS_DEPLOY_FILE )` and gated on
+`CAP_RESTRICTED`.
+
+---
+
+## 36. Compare & Sync: order and weight
+
+- **Group order follows what a reader needs**: *Not on Production → Only on Production →
+  Different → In sync* — the groups where the two sites disagree about what **exists**, then
+  about **content**, then the one where there is nothing to do. The summary cards match
+  exactly, because they are now links *into* those tables, and a summary that lists things in
+  one order and scrolls to them in another is worse than one that does not scroll at all.
+- **A card is a `<button>` only when its table was rendered.** Three of the four groups are
+  skipped entirely when empty, so a card reading 0 stays a plain `<div>` rather than a control
+  that silently does nothing.
+- **"In sync" renders 10 rows; the rest sit in a `<template>`** and arrive 50 at a time.
+  `<template>` content is parsed but never laid out or painted until moved into the document,
+  so the rows cost nothing until asked for.
+
+  **Why not AJAX:** `CompareService` is deliberately uncached, so a "show more" fetch would
+  re-run the entire comparison — signing another call to Production for up to 2000 posts to
+  reveal fifty rows. **Why not `display:none`:** a hidden row is still parsed and still laid
+  out, so it buys nothing.
+
+---
+
+## 37. How to continue in a new chat
+
+Point the session at this file and the plugin dir.
+
+**State of play (0.14.0): 2219 assertions green, `SECURITY.md` has nothing outstanding, §26
+and §26b are fully closed, and every feature has been verified on the live pair** — including
+the three that were carried across several builds: cancel mid-push (§33), the restricted
+screens (§21, §35) and the default status for new items (§32).
+
+There is no functional backlog. What remains is housekeeping.
+
+### Standing constraints from the client
+
+Carry these forward; they have applied throughout and were stated explicitly:
+
+- **Do not break existing features.**
+- **Any major change is discussed and approved before implementation**, not after.
+- **Never create a build without being asked.** Version numbers are the client's call.
+- **The `deploypress/` checkout is abandoned.** Never read from or cite it.
+
+### Open housekeeping
+
+1. **`readme.txt` `Contributors` is still a placeholder.** The build warns on every run.
+   wordpress.org-only, so it means nothing on a client install — but it is visible. Awaiting
+   a username or permission to drop the line. *(Deferred by the client, not forgotten.)*
+2. **`IFS-Deploy-User-Guide.docx` is stale.** Still branded "IFS Deploy" and predates the
+   restricted screens, menu hiding, the Compare & Sync changes and the default status. It is
+   client-facing, so it matters more than the internal docs.
+3. **Rotate the two WP Engine passwords** — still live in git history (§1). Untracking
+   `.vscode/sftp.json` stopped future commits; it did nothing about the past.
+4. **Delete the legacy migration** once §29 has run on both sites. That is the intended
+   endgame and the only way the last old-name strings go away.
+5. Extend Compare & Sync and the preview to terms / options / media / menus (§18).
+
+### Things that will bite a newcomer
+
+- **`glob()` returns nothing here.** The path contains `[22020]`, read as a character class.
+  Use `scandir()`. This has cost real time more than once.
+- **Never edit `assets/css/admin.css`** — it is generated. Edit the source and rebuild (§2).
+  The build script refuses to package a stylesheet older than its source, which is the only
+  thing standing between you and a silent no-op.
+- **A test that cannot demonstrate the bug it guards is not evidence.** Several assertions in
+  this repo have passed vacuously — a `.*?` with `/s` running past its target function into
+  the next one is the recurring shape. Extract the function body first, then assert on it.
+- **Strip comments before asserting on source** (`php_strip_whitespace()`), or the docblock
+  explaining the thing satisfies the assertion about the thing.
+- **Both sites must run the same version.** `/cancel` and `/id-space` are routes an older
+  peer answers 404 to, and the removal intent (§30) is read on the receiving side.
 
 ### If the plugin goes to wordpress.org
 
-`IFS Deploy` is **not** a viable public name: `IFS` is the trading name of a large ERP vendor,
-and guideline 17 is about exactly that. Fine for a build that only runs on the client's own two
-sites; a rejection risk on submission. `stagio` and `portro` were free when checked (§25).
+Neither name is a candidate. `IFS` is the trading name of a large ERP vendor (ifs.com) and
+`Copperleaf` is the client's own brand — guideline 17 is about exactly that. Both are fine
+for a build that only runs on the client's two sites; both are a rejection risk on
+submission. `stagio` and `portro` were free when checked (§25).
 
-Decide then whether the .org release keeps `ifs_deploy_` internals under a different display
-name (cheap, and what this build does) or renames them too — a DB migration plus a coordinated
-release, because the slug is fixed once approved.
+Decide then whether a .org release keeps the `ifs_deploy_` internals under a different
+display name — cheap, and precisely what this build already does twice over — or renames
+them too, which is a DB migration plus a coordinated release, because the slug is fixed once
+approved.

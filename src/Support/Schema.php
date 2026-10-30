@@ -25,23 +25,23 @@ use IfsDeploy\Export\OptionExporter;
  *   6 — no schema change. `OptionExporter::option_id()` stopped deriving an option's
  *       queue id from crc32, so the rows filed under the old value are re-keyed —
  *       see migrate().
+ *   7 — queue gains `baseline_hash`: the state an object held BEFORE its pending change
+ *       began. Editing something and then undoing the edit used to leave the row queued
+ *       for ever, because the row only remembered the state it was changed TO.
+ *       Also collapses duplicate rows for one object, now that identity is
+ *       (object_type, object_id) rather than including the subtype.
+ *   8 — the `api_addresses` table. The roster of callers is kept apart from the request
+ *       log so it survives Clear and retention, and so a healthy pair no longer needs a
+ *       row per accepted request just to stay complete. Backfilled from any existing
+ *       api_log rows — see migrate().
+ *   9 — no schema change. Removes pending queue rows the current rules would never have
+ *       created: those with no author (`user_id = 0`), and plugin/theme archives.
  *  10 — queue gains `action_label`: what the OPERATOR did, as opposed to what the deploy
  *       will do. `action` stays `update`/`delete` and still drives everything; the label
  *       rides alongside it and is only displayed, so the Action column can say Trashed,
  *       Restored, Published or Added instead of calling all four "update".
  *       Re-runs the v9 archive sweep, because `on_trash()` did not apply the rule that
  *       created it and went on producing plugin-ZIP rows after the upgrade.
- *   9 — no schema change. Removes pending queue rows the current rules would never have
- *       created: those with no author (`user_id = 0`), and plugin/theme archives.
- *   8 — the `api_addresses` table. The roster of callers is kept apart from the request
- *       log so it survives Clear and retention, and so a healthy pair no longer needs a
- *       row per accepted request just to stay complete. Backfilled from any existing
- *       api_log rows — see migrate().
- *   7 — queue gains `baseline_hash`: the state an object held BEFORE its pending change
- *       began. Editing something and then undoing the edit used to leave the row queued
- *       for ever, because the row only remembered the state it was changed TO.
- *       Also collapses duplicate rows for one object, now that identity is
- *       (object_type, object_id) rather than including the subtype.
  */
 final class Schema {
 

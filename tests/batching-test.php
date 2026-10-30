@@ -140,8 +140,23 @@ ok( 'the send_batch body was isolated', '' !== $batch_body && false === strpos( 
 
 // Both sources must go through it, or one of them would quietly lack the record and the
 // cancellation checks.
-ok( 'the queue path goes through it', (bool) preg_match( '/function deploy_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, \$failed \)/s', $service ) );
-ok( 'and so does the Compare path', (bool) preg_match( '/function deploy_post_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, 0 \)/s', $service ) );
+ok( 'the queue path goes through it', (bool) preg_match( '/function deploy_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, \$failed, \$skipped \)/s', $service ) );
+ok( 'and so does the Compare path', (bool) preg_match( '/function deploy_post_batch\(.*?send_batch\( \$uuid, \$objects, \$mapped, \$user_id, \$failed \)/s', $service ) );
+
+/*
+ * THE COMPARE PATH COUNTS ITS FAILURES TOO.
+ *
+ * It passed a literal 0 as the failure count, so a push in which every export returned
+ * null was logged object by object and then reported as a SUCCESS that sent nothing.
+ * Unlike the queue path there is no row to mark failed, which is precisely why the count
+ * had to exist: nothing else recorded that anything had gone wrong.
+ */
+preg_match( '/function deploy_post_batch\(.*?(?=function [a-z_]+\()/s', $service, $compare_slice );
+
+$compare_body = (string) ( $compare_slice[0] ?? '' );
+
+ok( 'the compare body was isolated', '' !== $compare_body && false === strpos( $compare_body, 'function send_batch(' ) );
+ok( 'a failed export is counted', false !== strpos( $compare_body, '++$failed;' ) );
 
 ok( 'the batch opens a deployment record', false !== strpos( $batch_body, 'deployments->create(' ) );
 ok( 'and updates it with the results', false !== strpos( $batch_body, 'deployments->update(' ) );
@@ -435,6 +450,91 @@ ok( 'no request is made to reveal them',  false === strpos( $reveal_body, '.post
 // One insertion, not one per row — appending individually re-lays out the table each time.
 ok( 'the batch is inserted in one go', false !== strpos( $js, 'createDocumentFragment()' ) );
 ok( 'and the button goes when nothing is left', false !== strpos( $js, "$btn.closest( '.ifs-deploy-more' ).remove()" ) );
+
+
+echo "\n=== a push that sends NOTHING never reports success ===\n";
+/*
+ * ── THE BUG THIS PINS ──────────────────────────────────────────────────────────────
+ *
+ * Reported from a live site: Staging said the push had succeeded and Production never
+ * received anything, with no log entry anywhere explaining it.
+ *
+ * Three places drop a queue row that is missing or no longer pending. They did it in
+ * SILENCE and without counting, so an emptied batch reached send_batch()'s empty branch,
+ * which returned a bare `ok => true`. admin.js finishes as soon as it has no batches
+ * left, so the dialog ran to "Pushed 0 items to Production." and reloaded the page — which
+ * reads exactly like a successful deploy of the content still on screen.
+ *
+ * The rows are still skipped; that part was always correct. What changed is that zero work
+ * can no longer be reported as success.
+ */
+preg_match( '/function send_batch\(.*?(?=function [a-z_]+\()/s', $service, $empty_slice );
+
+$empty_body = (string) ( $empty_slice[0] ?? '' );
+
+ok( 'the send_batch body was isolated again', '' !== $empty_body && false === strpos( $empty_body, 'function dispatch(' ) );
+ok( 'send_batch takes a skipped count',  (bool) preg_match( '/function send_batch\([^)]*int \$skipped = 0 \)/', $service ) );
+ok( 'and refuses when rows were skipped', (bool) preg_match( '/if \( \$skipped > 0 \) \{\s*return array\(\s*\x27ok\x27\s*=> false,/s', $empty_body ) );
+
+/*
+ * The remaining `ok => true` is the one honest case: nothing was selected at all. It must
+ * still be reachable, or pushing an empty selection would start reporting errors.
+ */
+ok( 'an empty selection is still not an error', (bool) preg_match( "/'ok'\s*=> true,/", $empty_body ) );
+ok( 'and a build failure is still an error',    (bool) preg_match( '/if \( \$failed > 0 \) \{/', $empty_body ) );
+
+echo "\n=== and the skip is written down ===\n";
+//
+// Detailed logging is OFF by default and is switched on from Logs & Diagnostics, which is
+// itself one of the restricted screens — so a `debug` entry is the one nobody can reach at
+// the moment they need it. These are warnings for that reason.
+ok( 'there is one shared skip helper',   (bool) preg_match( '/function skip_reason\( \?object \$item, int \$queue_id \)/', $service ) );
+ok( 'a missing row is logged',           (bool) preg_match( '/Queue row no longer exists/', $service ) );
+ok( 'a non-pending row is logged',       (bool) preg_match( '/Queue row is no longer pending/', $service ) );
+ok( 'at warning level, not debug',       2 === preg_match_all( '/DebugLog::warning\(\s*\x27Queue row/', $service ) );
+
+// The log has to name the row and what state it was actually in, or it says no more than
+// "something was skipped".
+preg_match( '/function skip_reason\(.*?(?=function [a-z_]+\()/s', $service, $skip_slice );
+
+$skip_body = (string) ( $skip_slice[0] ?? '' );
+
+ok( 'the skip body was isolated',     '' !== $skip_body && false === strpos( $skip_body, 'function deploy(' ) );
+ok( 'it records the queue id',        false !== strpos( $skip_body, "'queue_id'" ) );
+ok( 'and the status it was found in', false !== strpos( $skip_body, "'status' => (string) " . '$item->status' ) );
+
+/*
+ * ALL THREE SITES GO THROUGH IT.
+ *
+ * deploy(), plan() and deploy_batch() each had their own copy of the same condition. One
+ * of them keeping a bare `continue` would reopen the hole on whichever screen used it.
+ */
+ok( 'no bare status skip is left', 0 === preg_match( '/QueueRepository::STATUS_PENDING !== \$item->status \) \{\s*continue;/', $service ) );
+ok( 'all three call the helper',    3 === preg_match_all( '/\$this->skip_reason\(/', $service ) );
+
+echo "\n=== the dialog refuses to start a push of nothing ===\n";
+//
+// Belt and braces: send_batch() can only answer once a batch is sent, and when the PLAN is
+// empty no batch is ever sent. pushNext() finishes on an empty batch list, so the guard has
+// to sit before the push object is built.
+ok( 'the plan carries the skipped count', (bool) preg_match( "/'skipped' => \\\$skipped,/", $service ) );
+ok( 'and a message when it emptied the plan', (bool) preg_match( "/\\\$skipped > 0 && empty\( \\\$items \)/", $service ) );
+ok( 'both halves share one wording',      (bool) preg_match( '/public static function skipped_message\( int \$skipped \)/', $service ) );
+
+ok( 'the dialog checks the total first',  false !== strpos( $js, 'if ( ! res.data.total ) {' ) );
+
+preg_match( '/if \( ! res\.data\.total \) \{.*?\}/s', $js, $guard );
+
+$guard_body = (string) ( $guard[0] ?? '' );
+
+ok( 'it reports rather than starting', false !== strpos( $guard_body, 'notify(' ) && false !== strpos( $guard_body, 'return;' ) );
+ok( 'and prefers the server\x27s reason', false !== strpos( $guard_body, 'res.data.message' ) );
+
+// The guard must come BEFORE the push object exists, or pushNext() runs regardless.
+$at_guard = strpos( $js, 'if ( ! res.data.total ) {' );
+$at_push  = strpos( $js, 'push = {' );
+
+ok( 'the guard precedes the push object', false !== $at_guard && false !== $at_push && $at_guard < $at_push );
 
 echo "\n=== Compare & Sync can push several rows at once ===\n";
 //

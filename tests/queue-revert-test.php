@@ -222,6 +222,39 @@ ok( 'and neither is a delete', false === $q->upsert( 'media', '', 805, 'ifs-depl
 
 ok( 'nothing at all was written', $before === count( $GLOBALS['wpdb']->rows ) );
 
+/*
+ * ── AND IT SAYS SO SOMEWHERE SOMEBODY CAN SEE ──────────────────────────────────────
+ *
+ * Dropping the change was the decision; doing it in silence was the bug. The per-event
+ * entry stays at `debug` because one cron pass can drop dozens and the log holds 200 in
+ * total — noise EVICTS the errors somebody needs. But `debug` is off by default and is
+ * switched on from Logs & Diagnostics, which is itself a restricted screen, so on a live
+ * site the changes vanished with the only record of it behind a door nobody could open.
+ *
+ * So the first skip of each request is a WARNING, which is never gated.
+ */
+$logged = get_option( 'ifs_deploy_debug_log', array() );
+$warned = array_values(
+	array_filter(
+		is_array( $logged ) ? $logged : array(),
+		static fn( $e ): bool => 'warning' === ( $e['level'] ?? '' )
+			&& false !== strpos( (string) ( $e['message'] ?? '' ), 'no user was logged in' )
+	)
+);
+
+ok( 'the skip is reported at warning level', 1 === count( $warned ) );
+ok( 'and it is not gated behind Detailed logging', empty( $GLOBALS['dp_options']['ifs_deploy_verbose_log'] ) );
+
+// SIX skips just happened and there is ONE warning. A line per dropped object would bury
+// the deployment error underneath, which is the whole reason the detail is gated.
+ok( 'six skips produced exactly one warning', 1 === count( $warned ) );
+
+// It has to name a way out, or it is an alarm with no answer.
+$text = (string) ( $warned[0]['message'] ?? '' );
+
+ok( 'it names the filter that re-enables tracking', false !== strpos( $text, 'ifs_deploy_track_without_user' ) );
+ok( 'and points at Detailed logging for the rest', false !== strpos( $text, 'Detailed logging' ) );
+
 echo "\n=== 14. but a real user is completely unaffected ===\n";
 //
 // The whole risk of this rule is over-reach, so the ordinary path is pinned right beside it.

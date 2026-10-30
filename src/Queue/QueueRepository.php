@@ -25,6 +25,14 @@ final class QueueRepository {
 	public const STATUS_UNCHANGED = 'unchanged';
 
 	/**
+	 * Has the "no logged-in user" warning already been written this request?
+	 *
+	 * Per request, not per site: one pass of background work should say so once, and the
+	 * next request is a new chance to notice it is still happening.
+	 */
+	private static bool $warned_authorless = false;
+
+	/**
 	 * Insert a new pending item or update the existing one for this object.
 	 *
 	 * When the object's hash is unchanged from the stored row, this is a no-op
@@ -80,6 +88,37 @@ final class QueueRepository {
 			 * @param int    $object_id Object id.
 			 */
 			if ( ! apply_filters( 'ifs_deploy_track_without_user', false, $type, $object_id ) ) {
+				/*
+				 * ── ONE WARNING PER REQUEST, AND THE DETAIL BEHIND IT ─────────────────
+				 *
+				 * The per-event entry below stays at `debug`, because the volume is the
+				 * whole reason it is gated: one WP-CLI run or one cron pass can drop
+				 * dozens of changes, and the log holds 200 entries in total — noise does
+				 * not merely clutter it, it EVICTS the errors somebody needs.
+				 *
+				 * But silence was worse. Detailed logging is off by default and is
+				 * switched on from Logs & Diagnostics, which is itself one of the
+				 * restricted screens — so on a site where content IS edited this way, the
+				 * changes vanished with the only record of it on a screen nobody could
+				 * open. Reported from a live site as content never reaching Production.
+				 *
+				 * So: the FIRST skip in a request is a warning, which is never gated and
+				 * is enough to tell somebody where to look. The rest of that request is
+				 * left to the debug entries. A static flag rather than a transient keeps
+				 * this free of storage and of anything that could itself fail.
+				 */
+				if ( ! self::$warned_authorless ) {
+					self::$warned_authorless = true;
+
+					DebugLog::warning(
+						'A content change was NOT tracked because no user was logged in. Background work (cron, WP-CLI, an importer or a REST call) does not create pending changes. Switch on Detailed logging to see each one, or add the ifs_deploy_track_without_user filter to track them.',
+						array(
+							'first_seen' => $type . ' ' . $object_id,
+							'hook'       => function_exists( 'current_filter' ) ? (string) current_filter() : '',
+						)
+					);
+				}
+
 				DebugLog::debug(
 					'Change ignored: no logged-in user made it',
 					array(

@@ -56,13 +56,58 @@ final class DeploymentService {
 	 *
 	 * @return array{ok:bool,message:string,uuid:string,status:string}
 	 */
+	/**
+	 * Is this row still pushable, and say so in the log when it is not.
+	 *
+	 * ── WHY THIS IS NOT JUST `continue` ────────────────────────────────────────────
+	 *
+	 * Three places dropped a row that was missing or no longer pending, in silence and
+	 * without counting it. When that emptied the batch, `send_batch()` reported a bare
+	 * success — so a push could announce "Pushed 0 items to Production." having sent
+	 * nothing, with no entry anywhere saying why. That is the failure this exists to make
+	 * impossible: the row is still skipped, but it is now COUNTED and RECORDED.
+	 *
+	 * Warning rather than debug on purpose. Detailed logging is off by default and is
+	 * toggled on Logs & Diagnostics, which is itself one of the restricted screens — so a
+	 * debug entry is exactly the entry nobody can reach when they need it most.
+	 *
+	 * @param object|null $item The queue row, or null when it no longer exists.
+	 */
+	private function skip_reason( ?object $item, int $queue_id ): ?string {
+		if ( null === $item ) {
+			DebugLog::warning(
+				'Queue row no longer exists, so it was not pushed',
+				array( 'queue_id' => $queue_id )
+			);
+
+			return 'missing';
+		}
+
+		if ( QueueRepository::STATUS_PENDING !== $item->status ) {
+			DebugLog::warning(
+				'Queue row is no longer pending, so it was not pushed',
+				array(
+					'queue_id' => (int) $item->id,
+					'status'   => (string) $item->status,
+					'type'     => (string) $item->object_type,
+					'objectid' => (int) $item->object_id,
+					'title'    => (string) $item->object_title,
+				)
+			);
+
+			return (string) $item->status;
+		}
+
+		return null;
+	}
+
 	public function deploy( array $queue_ids, int $user_id ): array {
 		$objects = array();
 		$mapped  = array(); // "type|object id" => queue id.
 
 		foreach ( $queue_ids as $queue_id ) {
 			$item = $this->queue->get( (int) $queue_id );
-			if ( null === $item || QueueRepository::STATUS_PENDING !== $item->status ) {
+			if ( null !== $this->skip_reason( $item, (int) $queue_id ) ) {
 				continue;
 			}
 
@@ -137,13 +182,34 @@ final class DeploymentService {
 	 *
 	 * @return array{uuid:string,batches:array<int,array<int,array{id:int,type:string,title:string}>>,total:int}
 	 */
+	/**
+	 * Why a push sent nothing, when rows were selected but none survived.
+	 *
+	 * Shared by the planner and by `send_batch()`, so the dialog and the push itself give
+	 * the same account of the same situation rather than two different ones.
+	 */
+	public static function skipped_message( int $skipped ): string {
+		return sprintf(
+			/* translators: %d: how many selected items were no longer pending */
+			_n(
+				'Nothing was sent. The item you selected is no longer pending — it may already have been pushed, or changed by someone else since this page was loaded. Reload the page to see its current state.',
+				'Nothing was sent. The %d items you selected are no longer pending — they may already have been pushed, or changed by someone else since this page was loaded. Reload the page to see their current state.',
+				$skipped,
+				'ifs-deploy'
+			),
+			$skipped
+		);
+	}
+
 	public function plan( array $queue_ids ): array {
-		$rows = array();
+		$rows    = array();
+		$skipped = 0;
 
 		foreach ( $queue_ids as $queue_id ) {
 			$item = $this->queue->get( (int) $queue_id );
 
-			if ( null === $item || QueueRepository::STATUS_PENDING !== $item->status ) {
+			if ( null !== $this->skip_reason( $item, (int) $queue_id ) ) {
+				++$skipped;
 				continue;
 			}
 
@@ -171,6 +237,14 @@ final class DeploymentService {
 			'uuid'    => wp_generate_uuid4(),
 			'batches' => array_chunk( $items, self::BATCH_SIZE ),
 			'total'   => count( $items ),
+
+			/*
+			 * Rows that were selected and are no longer pushable. The dialog refuses to
+			 * start a push of nothing when this is non-zero, instead of running to
+			 * "Pushed 0 items to Production." and reloading as though it had worked.
+			 */
+			'skipped' => $skipped,
+			'message' => $skipped > 0 && empty( $items ) ? self::skipped_message( $skipped ) : '',
 		);
 	}
 
@@ -236,11 +310,13 @@ final class DeploymentService {
 		$objects = array();
 		$mapped  = array();
 		$failed  = 0;
+		$skipped = 0;
 
 		foreach ( $queue_ids as $queue_id ) {
 			$item = $this->queue->get( (int) $queue_id );
 
-			if ( null === $item || QueueRepository::STATUS_PENDING !== $item->status ) {
+			if ( null !== $this->skip_reason( $item, (int) $queue_id ) ) {
+				++$skipped;
 				continue;
 			}
 
@@ -267,7 +343,7 @@ final class DeploymentService {
 			$mapped[ self::map_key( (string) $item->object_type, (int) $item->object_id ) ] = (int) $item->id;
 		}
 
-		return $this->send_batch( $uuid, $objects, $mapped, $user_id, $failed );
+		return $this->send_batch( $uuid, $objects, $mapped, $user_id, $failed, $skipped );
 	}
 
 	/**
@@ -291,6 +367,7 @@ final class DeploymentService {
 	public function deploy_post_batch( string $uuid, array $post_ids, int $user_id ): array {
 		$objects = array();
 		$mapped  = array();
+		$failed  = 0;
 
 		foreach ( $post_ids as $post_id ) {
 			$post_id = (int) $post_id;
@@ -302,6 +379,7 @@ final class DeploymentService {
 					array( 'post_id' => $post_id )
 				);
 
+				++$failed;
 				continue;
 			}
 
@@ -315,7 +393,7 @@ final class DeploymentService {
 			$mapped[ self::map_key( 'post', $post_id ) ] = $queue_item ? (int) $queue_item->id : 0;
 		}
 
-		return $this->send_batch( $uuid, $objects, $mapped, $user_id, 0 );
+		return $this->send_batch( $uuid, $objects, $mapped, $user_id, $failed );
 	}
 
 	/**
@@ -330,7 +408,7 @@ final class DeploymentService {
 	 * @param int            $failed  Packages that could not be built and are already
 	 *                                marked failed — see the empty-batch branch.
 	 */
-	private function send_batch( string $uuid, array $objects, array $mapped, int $user_id, int $failed ): array {
+	private function send_batch( string $uuid, array $objects, array $mapped, int $user_id, int $failed, int $skipped = 0 ): array {
 		if ( empty( $objects ) ) {
 			/*
 			 * NOTHING WAS SENT — and whether that is fine depends entirely on WHY.
@@ -340,10 +418,22 @@ final class DeploymentService {
 			 * the page reloaded, and Production was untouched. Reported as "push kar rha hu
 			 * lekin live site pe koi changes nahi ho rahe".
 			 *
-			 * Rows that resolved themselves between planning and sending really are nothing
-			 * to do. A row whose PACKAGE COULD NOT BE BUILT is a failure, and it is already
-			 * marked failed above — so announcing success on top of that is the one thing
-			 * this must not do.
+			 * A row whose PACKAGE COULD NOT BE BUILT is a failure, and it is already marked
+			 * failed above — so announcing success on top of that is the one thing this
+			 * must not do.
+			 *
+			 * ── AND NEITHER IS A ROW THAT WENT MISSING ────────────────────────────────
+			 *
+			 * This branch used to treat every other empty batch as "nothing to do" and
+			 * return a bare success. It is reached whenever the selected rows are no longer
+			 * pending — pushed from another tab, cleared by verification, or edited by
+			 * somebody else — and the push then ran to "Pushed 0 items to Production." and
+			 * reloaded, which reads as a successful deploy of the content still sitting on
+			 * screen. Reported from a live site as a Success message with nothing arriving
+			 * on Production.
+			 *
+			 * Zero work is never a success. The only genuinely silent case left is zero
+			 * rows selected, which the screens already refuse before reaching here.
 			 */
 			if ( $failed > 0 ) {
 				return array(
@@ -351,8 +441,8 @@ final class DeploymentService {
 					'message' => sprintf(
 						/* translators: %d: how many items could not be prepared */
 						_n(
-							'%d item could not be prepared for deployment and nothing was sent. It is marked failed — see Logs & Diagnostics.',
-							'%d items could not be prepared for deployment and nothing was sent. They are marked failed — see Logs & Diagnostics.',
+							'%d item could not be prepared for deployment and nothing was sent. See Logs & Diagnostics for the reason.',
+							'%d items could not be prepared for deployment and nothing was sent. See Logs & Diagnostics for the reason.',
 							$failed,
 							'ifs-deploy'
 						),
@@ -361,6 +451,17 @@ final class DeploymentService {
 					'uuid'    => $uuid,
 					'status'  => DeploymentRepository::STATUS_FAILED,
 					'results' => 0,
+				);
+			}
+
+			if ( $skipped > 0 ) {
+				return array(
+					'ok'      => false,
+					'message' => self::skipped_message( $skipped ),
+					'uuid'    => $uuid,
+					'status'  => DeploymentRepository::STATUS_PENDING,
+					'results' => 0,
+					'skipped' => $skipped,
 				);
 			}
 

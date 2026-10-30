@@ -1,8 +1,8 @@
 # Copperleaf Deploy — Checklist
 
 **Last build:** `ifs-deploy-0.14.0.zip` · DB v10 · 2219 tests green · 11 September 2026
-**The working tree and the build match.** Everything below is in that zip and testable now —
-install it on **both** sites before you start.
+**The working tree and the build match, and every feature in it is verified on your live
+pair.** One documentation decision is open; nothing else is.
 
 Priority is **1–10**, where 10 must happen first.
 
@@ -10,71 +10,9 @@ Priority is **1–10**, where 10 must happen first.
 
 ## 🔴 Pending — needs testing on your live pair
 
-- **(8) Cancel mid-push.** Start a push of ~10 items and press
-  **Cancel** while it runs. Expect four things together:
-  - **every row stays in Pending Changes** — a cancel must not throw work away,
-  - anything already sent is reverted on Production,
-  - Deployment History shows **one** row marked *Cancelled*, not a deploy plus an undo,
-  - pushing those same rows again straight afterwards works normally.
-
-  Press Cancel **while a batch is mid-flight**, not in the gap between two — that is the
-  case that was broken, twice over. A batch already on the wire kept running and marked its
-  rows deployed *after* the cancel had put them back; and the cancellation was written down
-  only after the round trip to Production finished, so a batch completing inside that window
-  read "not cancelled" and went live anyway. Both were fixed in 0.12.5, so the build you
-  already have carries the fix — this is the last piece of that work still unconfirmed on a
-  live pair.
-
-- **(8) Status for new items.** On **Production**, set
-  Settings → *Status for new items* → **Draft**. Then:
-  - push a page that does **not** exist on Production yet — it should arrive as a Draft,
-  - push an edit to a page already **published** on Production — it must **stay published**,
-  - change a page's status on Staging deliberately and push — that change applies as normal.
-
-- **(9) Restricted admin screens.** Put this in `wp-config.php` on **both** sites:
-
-  ```php
-  define( 'IFS_DEPLOY_ADMIN_USERS', '1,7' );
-  ```
-
-  **Add it before you update, on both sites.** Without it nobody can reach Compare & Sync,
-  Settings or Logs & Diagnostics — that is deliberate, not a bug. The screens are now
-  *deny by default*: being an administrator is no longer enough on its own, which is the
-  whole point of the setting.
-
-  Then check:
-  - as a user **in** the list, all three screens still work,
-  - as a user **not** in the list, all three are gone from the tabs and typing their URLs
-    directly is refused,
-  - that same user still has Overview, Pending Changes and History, and can still push and
-    roll back — the restriction hides three screens, it does not remove them from the plugin,
-  - with the constant **missing**, an administrator sees a notice giving the exact line to
-    add with their own user ID already in it, both on the plugin screens and on
-    **Plugins → All Plugins**.
-
-  That notice is the only way back in, since Settings is itself one of the hidden screens —
-  so it is worth confirming it actually appears on your Production site, where the sidebar
-  menu is hidden too and the Plugins list is the only page you are sure to pass through.
-
-- **(6) Compare & Sync reads top to bottom.** The four groups are now ordered *Not on
-  Production → Only on Production → Different → In sync*: the groups where the two sites
-  disagree about what **exists**, then the one where they disagree about **content**, then
-  the one where they agree and there is nothing to do. The summary cards follow that same
-  order.
-
-- **(6) Clicking a summary card jumps to its table.** A card is clickable only when its
-  table was actually rendered, so a card reading 0 stays a plain box rather than becoming a
-  control that silently does nothing.
-
-- **(5) In sync loads 10 rows, then 50 at a time.** On a site with hundreds of synced pages,
-  check the screen opens quickly and that **Show more (N hidden)** reveals the rest in
-  blocks of 50 — without reloading the page and without re-running the comparison against
-  Production. *Only on Production* is deliberately not limited, by your call.
-
-- **(5) The Copperleaf Deploy menu is hidden on Production.** On the Production site the sidebar
-  entry is gone; Settings is reached through **Plugins → All Plugins → Copperleaf Deploy →
-  Settings**. Check that an Editor on **Staging** can still edit a page and push it exactly
-  as before — nothing about that workflow changed.
+**Nothing outstanding.** Every feature built so far has been verified on your pair against
+`ifs-deploy-0.14.0.zip`, including the three that had been carried for several builds —
+cancel mid-push, the restricted screens, and the default status for new items.
 
 ---
 
@@ -88,6 +26,28 @@ Priority is **1–10**, where 10 must happen first.
 ---
 
 ## ✅ Done — verified working on your live pair
+
+**Access and visibility** *(0.14.0)*
+- Compare & Sync, Settings and Logs & Diagnostics restricted to the user IDs named in
+  `IFS_DEPLOY_ADMIN_USERS`, and hidden from everyone when the constant is absent.
+- The recovery notice appears for a locked-out administrator, giving the exact line to add
+  with their own user ID in it — on the plugin screens and on Plugins → All Plugins.
+- A restricted user keeps Overview, Pending Changes, History, pushing and rollback.
+- The sidebar menu is hidden on Production; Settings reached via Plugins → All Plugins.
+- The Staging workflow is unchanged — an Editor still edits and pushes as before.
+
+**Compare & Sync** *(0.14.0)*
+- Groups ordered Not on Production → Only on Production → Different → In sync, with the
+  summary cards in the same order.
+- Clicking a summary card jumps to its table; a card reading 0 stays a plain box.
+- "In sync" renders 10 rows, then 50 per click, with no reload and no re-comparison.
+
+**Pushing** *(earlier builds, confirmed on 0.14.0)*
+- Cancel mid-push: rows stay in Pending Changes, anything already sent is reverted, History
+  shows one Cancelled row, and re-pushing straight afterwards works. Confirmed with a batch
+  cancelled **in flight**, which is the case that was broken three times over.
+- Status for new items: new pages arrive at the chosen status, pages already published on
+  Production stay published, and a deliberate status change on Staging still applies.
 
 **Media**
 - Trashing media on Staging trashes it on Production (not destroyed).
